@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quiz & Test Website</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:"Segoe UI",sans-serif;}
+body{color:#fff;min-height:100vh;display:flex;flex-direction:column;background:#0f172a;}
+
+/* HEADER */
+.header{
+  position:fixed;top:0;left:0;width:100%;height:70px;
+  background:#020617;display:flex;justify-content:space-between;align-items:center;
+  padding:0 50px;z-index:100;transition:0.3s;
+}
+.header.blur{backdrop-filter:blur(8px);background:rgba(2,6,23,.7);}
+.logo{font-size:32px;font-weight:700;color:#3b82f6;}
+.navbar a{margin-left:25px;text-decoration:none;color:#fff;font-weight:500;font-size:17px;}
+.navbar a:hover{color:#c40094;}
+.navbar a.active{color:#c40094;}
+
+/* MAIN */
+.main{flex:1;padding-top:70px;display:flex;flex-direction:column;align-items:center;
+background:url('https://images.unsplash.com/photo-1526378722484-bd91ca387e72')center/cover no-repeat fixed;transition:0.4s;}
+.main.blur{filter:blur(6px);}
+
+/* HOME */
+.home{min-height:calc(100vh - 70px);display:flex;justify-content:center;align-items:center;width:100%;}
+.home-content{background:#fff;color:#1f2937;padding:60px;width:750px;border-radius:18px;text-align:center;box-shadow:0 15px 35px rgba(0,0,0,.5);}
+.home-content h1{font-size:40px;margin-bottom:15px;}
+.home-content p{margin-top:10px;font-size:18px;color:#555;}
+.start-btn{margin-top:30px;width:260px;height:60px;background:#c40094;color:#fff;font-size:20px;border:none;border-radius:10px;cursor:pointer;transition:0.3s;}
+.start-btn:hover{background:#a3007a;}
+
+/* POPUP */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:200;}
+.overlay.active{display:block;}
+.popup-info{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+background:#fff;color:#000;width:480px;padding:35px;border-radius:15px;display:none;z-index:300;}
+.popup-info.active{display:block;}
+.popup-info h2{text-align:center;color:#c40094;margin-bottom:20px;}
+.popup-info ol{padding-left:20px;}
+.popup-info li{margin:10px 0;font-size:16px;}
+.popup-buttons{display:flex;justify-content:space-between;margin-top:25px;}
+.popup-buttons button{width:45%;padding:12px;font-size:16px;border:none;border-radius:6px;cursor:pointer;}
+.exit-btn{background:#555;color:#fff;}
+.continue-btn{background:#c40094;color:#fff;}
+
+/* QUIZ */
+.quiz-section{display:none;flex-direction:column;align-items:center;margin-top:120px;}
+.quiz-box{background:#fff;color:#000;width:650px;padding:40px;border-radius:15px;box-shadow:0 10px 25px rgba(0,0,0,.4);}
+.option{background:#eee;padding:15px;margin:12px 0;border-radius:6px;cursor:pointer;font-size:17px;transition:0.3s;}
+.option:hover{background:#ddd;}
+.option.correct{background:#4caf50;color:#fff;}
+.option.incorrect{background:#f44336;color:#fff;}
+.timer{text-align:right;font-weight:bold;}
+.quiz-footer{margin-top:15px;width:650px;background:#fff;padding:15px 25px;display:flex;justify-content:space-between;align-items:center;border-radius:10px;box-shadow:0 5px 15px rgba(0,0,0,.2);}
+.next-btn{background:#c40094;color:#fff;border:none;padding:10px 30px;border-radius:6px;cursor:pointer;transition:0.3s;}
+.next-btn:hover{background:#a3007a;}
+
+/* RESULT */
+.result-box{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+background:#fff;color:#000;width:520px;padding:40px;border-radius:15px;text-align:center;display:none;z-index:400;}
+.result-box h2{color:#c40094;margin-bottom:20px;font-size:28px;}
+.result-box p{font-size:22px;margin-bottom:25px;}
+.result-box button{padding:12px 25px;margin:10px;border:none;border-radius:6px;cursor:pointer;font-size:16px;transition:0.3s;}
+.tryAgain-btn{background:#22c55e;color:#fff;}
+.goHome-btn{background:#555;color:#fff;}
+
+/* FOOTER */
+.footer{background:#020617;color:#fff;text-align:center;padding:25px;font-size:15px;margin-top:auto;}
+</style>
+</head>
+<body>
+
+<header class="header" id="navbar">
+  <div class="logo">QuizTest.</div>
+  <nav class="navbar">
+    <a href="#home" class="active">Home</a>
+    <a href="#about">About</a>
+    <a href="#services">Services</a>
+    <a href="#contact">Contact</a>
+  </nav>
+</header>
+
+<div class="main" id="main">
+<section class="home" id="home">
+  <div class="home-content">
+    <h1>Quiz & Test </h1>
+    <p>Test your knowledge in HTML, CSS, and JavaScript. 10 questions, 4 options each, instant feedback and final score.</p>
+    <button class="start-btn">Start Quiz</button>
+  </div>
+</section>
+</div>
+
+<div class="overlay"></div>
+<div class="popup-info">
+  <h2>Quiz Guide</h2>
+  <ol>
+    <li>Each question has 15 seconds.</li>
+    <li>There are 10 questions in total.</li>
+    <li>Each question has 4 options.</li>
+    <li>Correct answers appear in green.</li>
+    <li>Your final score is calculated at the end.</li>
+  </ol>
+  <div class="popup-buttons">
+    <button class="exit-btn">Exit</button>
+    <button class="continue-btn">Continue</button>
+  </div>
+</div>
+
+<section class="quiz-section">
+  <div class="quiz-box">
+    <h2 class="question-text"></h2>
+    <div class="option-list"></div>
+    <p class="timer">Time: <span id="time">15</span>s</p>
+  </div>
+  <div class="quiz-footer">
+    <span class="question-total"></span>
+    <button class="next-btn">Next</button>
+  </div>
+</section>
+
+<div class="result-box">
+  <h2>Quiz and Test Result</h2>
+  <p class="score-text"></p>
+  <button class="tryAgain-btn">Try Again</button>
+  <button class="goHome-btn">Go Home</button>
+</div>
+
+<footer class="footer" id="contact">&copy; 2025 Quiz and Test. All rights reserved.</footer>
+
+<script>
+const startBtn=document.querySelector(".start-btn");
+const popup=document.querySelector(".popup-info");
+const overlay=document.querySelector(".overlay");
+const continueBtn=document.querySelector(".continue-btn");
+const exitBtn=document.querySelector(".exit-btn");
+const quizSection=document.querySelector(".quiz-section");
+const questionText=document.querySelector(".question-text");
+const optionList=document.querySelector(".option-list");
+const questionTotal=document.querySelector(".question-total");
+const nextBtn=document.querySelector(".next-btn");
+const resultBox=document.querySelector(".result-box");
+const scoreText=document.querySelector(".score-text");
+const tryAgainBtn=document.querySelector(".tryAgain-btn");
+const goHomeBtn=document.querySelector(".goHome-btn");
+const timeEl=document.getElementById("time");
+const main=document.getElementById("main");
+const navbar=document.getElementById("navbar");
+
+const questions=[
+{q:"HTML stands for?",o:["Hyper Text Markup Language","High Text ML","Home Tool ML","None"],a:0},
+{q:"CSS stands for?",o:["Cascading Style Sheets","Creative Style","Color Sheet","None"],a:0},
+{q:"JS stands for?",o:["JavaScript","Just Script","Jolly","None"],a:0},
+{q:"<h1> tag is for?",o:["Heading","Paragraph","Link","Image"],a:0},
+{q:"CSS color property?",o:["color","text-color","font","bg"],a:0},
+{q:"JS is a?",o:["Programming Language","Markup","Style","DB"],a:0},
+{q:"HTML link tag?",o:["<a>","<link>","<url>","<href>"],a:0},
+{q:"CSS file extension?",o:[".css",".html",".js",".txt"],a:0},
+{q:"JS file extension?",o:[".js",".css",".java",".html"],a:0},
+{q:"Browser executes?",o:["JavaScript","Python","C++","Java"],a:0}
+];
+
+let index=0,score=0,time=15,timer;
+
+startBtn.onclick=()=>{
+  popup.classList.add("active");
+  overlay.classList.add("active");
+};
+exitBtn.onclick=()=>{
+  popup.classList.remove("active");
+  overlay.classList.remove("active");
+};
+continueBtn.onclick=()=>{
+  popup.classList.remove("active");
+  overlay.classList.remove("active");
+  main.classList.add("blur");
+  navbar.classList.add("blur");
+  quizSection.style.display="flex";
+  loadQ();
+};
+
+function loadQ(){
+clearInterval(timer);
+time=15;timeEl.textContent=time;
+timer=setInterval(()=>{
+time--;timeEl.textContent=time;
+if(time===0){clearInterval(timer);showAnswer();}
+},1000);
+let q=questions[index];
+questionText.textContent=q.q;
+optionList.innerHTML="";
+q.o.forEach((opt,i)=>{
+let div=document.createElement("div");
+div.className="option";
+div.textContent=opt;
+div.onclick=()=>check(i);
+optionList.appendChild(div);
+});
+questionTotal.textContent=`Question ${index+1} of ${questions.length}`;
+nextBtn.style.background="#c40094"; // start button color
+nextBtn.style.color="#fff";
+}
+
+function check(i){
+clearInterval(timer);
+let opts=document.querySelectorAll(".option");
+opts.forEach((o,idx)=>{
+o.style.pointerEvents="none";
+if(idx===questions[index].a)o.classList.add("correct");
+if(idx===i && i!==questions[index].a)o.classList.add("incorrect");
+});
+if(i===questions[index].a)score++;
+}
+
+function showAnswer(){
+document.querySelectorAll(".option").forEach((o,i)=>{
+if(i===questions[index].a)o.classList.add("correct");
+});
+}
+
+nextBtn.onclick=()=>{
+index++;
+if(index<questions.length)loadQ();
+else showResult();
+};
+
+function showResult(){
+quizSection.style.display="none";
+resultBox.style.display="block";
+scoreText.textContent=`Your Score: ${score} out of ${questions.length}`;
+}
+
+tryAgainBtn.onclick=()=>location.reload();
+goHomeBtn.onclick=()=>location.reload();
+</script>
+
+</body>
+</html>
+
