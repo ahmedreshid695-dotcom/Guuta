@@ -15,4 +15,10 @@ $conn = new mysqli($host, $user, $pass, $db, $port);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
+
+// Google OAuth Client ID
+$google_client_id = getenv('GOOGLE_CLIENT_ID') ?: "108394857492-exampleclientid.apps.googleusercontent.com";
+
+// Admin Email for registration notifications
+$admin_email = getenv('ADMIN_EMAIL') ?: "ahmedreshid695@gmail.com";
 ?>

@@ -11,8 +11,8 @@ if (isset($_POST['reset_password'])) {
 
     if (empty($email) || empty($new_password) || empty($confirm_password)) {
         $error = "Hundaa guutuu qabdu! (Please fill all fields!)";
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = "Email sirrii miti! (Invalid email address!)";
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
+        $error = "Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com is allowed!)";
     } elseif (strlen($new_password) < 6) {
         $error = "Password-n yoo xiqqaate qubee/lakkoofsa 6 ta'uu qaba! (Password must be at least 6 characters!)";
     } elseif ($new_password !== $confirm_password) {

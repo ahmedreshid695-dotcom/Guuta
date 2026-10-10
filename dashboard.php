@@ -19,8 +19,11 @@ a{display:block;margin-top:10px;}
 <body>
 
 <div class="box">
-<h2>Welcome <?php echo $_SESSION['student_name']; ?></h2>
-<p>Email: <?php echo $_SESSION['student_email']; ?></p>
+<?php if(!empty($_SESSION['student_picture'])): ?>
+    <img src="<?php echo htmlspecialchars($_SESSION['student_picture']); ?>" alt="Profile" style="width:75px; height:75px; border-radius:50%; margin-bottom:10px;">
+<?php endif; ?>
+<h2>Welcome <?php echo htmlspecialchars($_SESSION['student_name']); ?></h2>
+<p>Email: <?php echo htmlspecialchars($_SESSION['student_email']); ?></p>
 <p>This is your student dashboard.</p>
 <a href="forgot_password.php" style="color: #007bff; text-decoration: none; margin-bottom: 8px;">Password Jijjiiri (Change Password)</a>
 <a href="logout.php" style="color: red; text-decoration: none;">Logout</a>
