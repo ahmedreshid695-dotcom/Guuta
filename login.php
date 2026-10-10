@@ -50,7 +50,9 @@ button{padding:10px;background:green;color:white;border:none;border-radius:5px;}
 <input type="password" name="password" placeholder="Password" required>
 <button name="login">Login</button>
 </form>
-<a href="register.php">Create Account</a>
+<div style="margin-top: 15px;">
+    <a href="register.php">Create Account</a> | <a href="forgot_password.php">Forgot Password?</a>
+</div>
 </div>
 
 </body>

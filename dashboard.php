@@ -22,7 +22,8 @@ a{display:block;margin-top:10px;}
 <h2>Welcome <?php echo $_SESSION['student_name']; ?></h2>
 <p>Email: <?php echo $_SESSION['student_email']; ?></p>
 <p>This is your student dashboard.</p>
-<a href="logout.php">Logout</a>
+<a href="forgot_password.php" style="color: #007bff; text-decoration: none; margin-bottom: 8px;">Password Jijjiiri (Change Password)</a>
+<a href="logout.php" style="color: red; text-decoration: none;">Logout</a>
 </div>
 
 </body>
