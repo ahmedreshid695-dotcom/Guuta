@@ -93,13 +93,14 @@ if ($stmt->num_rows > 0) {
 // Set session
 $_SESSION['student_name'] = $student_name;
 $_SESSION['student_email'] = $student_email;
+$_SESSION['student_role'] = is_admin($student_email) ? 'admin' : 'student';
 if (!empty($picture)) {
     $_SESSION['student_picture'] = $picture;
 }
 
 echo json_encode([
     'success' => true,
-    'redirect' => 'dashboard.php'
+    'redirect' => 'index.php'
 ]);
 exit();
 ?>
