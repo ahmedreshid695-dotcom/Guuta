@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS students (
     email VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
     role VARCHAR(20) DEFAULT 'student',
+    picture VARCHAR(255) DEFAULT '',
+    department VARCHAR(100) DEFAULT 'General',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
