@@ -17,11 +17,25 @@ else
     done
 
     echo ">> Configuring database and permissions..."
-    mysql -e "CREATE DATABASE IF NOT EXISTS stu_register;"
-    mysql -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';" 2>/dev/null || true
-    mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;" 2>/dev/null || true
-    mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;" 2>/dev/null || true
-    mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+    mysql -u root <<'EOSQL'
+CREATE DATABASE IF NOT EXISTS stu_register;
+
+-- Allow root connections
+ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('');
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD('');
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+
+-- Create dedicated stu_user with stu_pass123 for guaranteed non-root TCP access
+CREATE USER IF NOT EXISTS 'stu_user'@'%' IDENTIFIED BY 'stu_pass123';
+GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'%' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS 'stu_user'@'localhost' IDENTIFIED BY 'stu_pass123';
+GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'localhost' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS 'stu_user'@'127.0.0.1' IDENTIFIED BY 'stu_pass123';
+GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'127.0.0.1' WITH GRANT OPTION;
+
+FLUSH PRIVILEGES;
+EOSQL
 
     if [ -f /var/www/html/database.sql ]; then
         echo ">> Importing database.sql..."

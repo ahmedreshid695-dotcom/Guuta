@@ -10,19 +10,45 @@ $pass = getenv('DB_PASS') !== false ? getenv('DB_PASS') : "";
 $db   = getenv('DB_NAME') ?: "stu_register";
 $port = (int)(getenv('DB_PORT') ?: 3306);
 
-try {
-    $conn = new mysqli($host, $user, $pass, $db, $port);
-} catch (mysqli_sql_exception $e) {
+$conn = null;
+$db_error = null;
+
+// Credentials to try (primary + smart fallbacks for Docker / XAMPP)
+$credentials_to_try = [
+    [$host, $user, $pass, $db, $port]
+];
+
+if (empty(getenv('DB_USER'))) {
+    $credentials_to_try[] = ['127.0.0.1', 'stu_user', 'stu_pass123', $db, 3306];
+    $credentials_to_try[] = ['localhost', 'stu_user', 'stu_pass123', $db, 3306];
+    $credentials_to_try[] = ['localhost', 'root', '', $db, 3306];
+    $credentials_to_try[] = ['127.0.0.1', 'root', 'root', $db, 3306];
+}
+
+foreach ($credentials_to_try as $cred) {
+    try {
+        $test_conn = @new mysqli($cred[0], $cred[1], $cred[2], $cred[3], $cred[4]);
+        if ($test_conn && !$test_conn->connect_errno) {
+            $conn = $test_conn;
+            $host = $cred[0];
+            $user = $cred[1];
+            $port = $cred[4];
+            $db_error = null;
+            break;
+        }
+    } catch (Throwable $e) {
+        $db_error = $e->getMessage();
+    }
+}
+
+if (!$conn || $conn->connect_errno) {
+    $err_msg = $db_error ?: ($conn ? $conn->connect_error : 'Unknown connection error');
     die("<div style='font-family:sans-serif;padding:20px;background:#fee;border:1px solid #f99;margin:20px;border-radius:8px;'>
         <h3 style='color:#c00;margin-top:0;'>Database Connection Error</h3>
         <p>Could not connect to MySQL database at <strong>" . htmlspecialchars($host) . ":" . htmlspecialchars((string)$port) . "</strong>.</p>
-        <p><strong>Reason:</strong> " . htmlspecialchars($e->getMessage()) . "</p>
+        <p><strong>Reason:</strong> " . htmlspecialchars($err_msg) . "</p>
         <p><em>Check your environment variables (<code>DB_HOST</code>, <code>DB_USER</code>, <code>DB_PASS</code>, <code>DB_NAME</code>, <code>DB_PORT</code>) or verify MySQL service is running.</em></p>
     </div>");
-}
-
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
 }
 
 // Auto-check and ensure role, picture, and department columns exist in students table

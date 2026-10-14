@@ -8,6 +8,8 @@ RUN apt-get update && \
         dos2unix && \
     docker-php-ext-install mysqli pdo pdo_mysql && \
     a2enmod rewrite && \
+    echo "ServerName localhost" >> /etc/apache2/apache2.conf && \
+    echo "DirectoryIndex index.php index.html" >> /etc/apache2/apache2.conf && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
