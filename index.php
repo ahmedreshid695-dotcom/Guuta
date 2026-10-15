@@ -13,65 +13,170 @@ if (isset($_GET['logout'])) {
 $alert_message = "";
 $alert_type = "";
 $active_auth_tab = "register"; // default tab: register or login or forgot
+$registration_success = !empty($_SESSION['registration_success']);
+unset($_SESSION['registration_success']);
+
+if (empty($_SESSION['google_login_csrf'])) {
+    $_SESSION['google_login_csrf'] = bin2hex(random_bytes(32));
+}
 
 // Handle Google Login via AJAX
 if (isset($_GET['action']) && $_GET['action'] === 'google_auth') {
     header('Content-Type: application/json');
     $input = json_decode(file_get_contents('php://input'), true);
     $id_token = $input['credential'] ?? '';
-    if (empty($id_token)) {
-        echo json_encode(['success' => false, 'message' => 'Token not provided']);
+    $requested_email = $input['email'] ?? '';
+    $csrf_token = $input['csrf_token'] ?? '';
+    if (!is_string($csrf_token) || !hash_equals($_SESSION['google_login_csrf'], $csrf_token)) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'The sign-in request expired. Refresh the page and try again.']);
         exit();
     }
-    
-    // Decode token safely
-    $parts = explode('.', $id_token);
-    $payload = null;
-    if (count($parts) === 3) {
-        $payload = json_decode(base64_decode(strtr($parts[1], '-_', '+/')), true);
-    }
-    
-    if (!$payload || empty($payload['email'])) {
-        echo json_encode(['success' => false, 'message' => 'Invalid Google token']);
+
+    if (!is_string($id_token) || $id_token === '' || strlen($id_token) > 8192) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Google did not provide a valid sign-in token.']);
         exit();
     }
-    
-    $g_email = $payload['email'];
-    $g_name  = $payload['name'] ?? explode('@', $g_email)[0];
-    $g_pic   = $payload['picture'] ?? '';
-    
-    // Check if exists
-    $chk = $conn->prepare("SELECT id, name, email, role FROM students WHERE email = ?");
+
+    if (strpos($google_client_id, 'exampleclientid') !== false) {
+        error_log('Google Sign-In is not configured with a real GOOGLE_CLIENT_ID.');
+        http_response_code(503);
+        echo json_encode(['success' => false, 'message' => 'Google Sign-In is not configured. Please contact the administrator.']);
+        exit();
+    }
+
+    $verification_url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' . rawurlencode($id_token);
+    $verification_context = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => 8,
+            'ignore_errors' => true,
+            'follow_location' => 0,
+            'header' => "Accept: application/json\r\nConnection: close\r\n"
+        ],
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true
+        ]
+    ]);
+    $verification_response = @file_get_contents($verification_url, false, $verification_context);
+    $verification_status = 0;
+    foreach ($http_response_header ?? [] as $response_header) {
+        if (preg_match('/^HTTP\/\S+\s+(\d{3})/', $response_header, $status_match)) {
+            $verification_status = (int)$status_match[1];
+            break;
+        }
+    }
+    if ($verification_response === false || $verification_status === 0 || $verification_status >= 500) {
+        error_log('Google ID token verification service could not be reached; HTTP status: ' . $verification_status);
+        http_response_code(503);
+        echo json_encode(['success' => false, 'message' => 'Google verification is temporarily unavailable. Please try again shortly.']);
+        exit();
+    }
+    $google_identity = is_string($verification_response) && $verification_status === 200
+        ? json_decode($verification_response, true)
+        : null;
+
+    if (!is_array($google_identity)
+        || !isset($google_identity['aud'], $google_identity['iss'], $google_identity['exp'], $google_identity['email'], $google_identity['email_verified'], $google_identity['sub'])
+        || !hash_equals($google_client_id, (string)$google_identity['aud'])
+        || !in_array($google_identity['iss'], ['accounts.google.com', 'https://accounts.google.com'], true)
+        || !is_numeric($google_identity['exp'])
+        || (int)$google_identity['exp'] <= time()
+        || !is_string($google_identity['sub'])
+        || $google_identity['sub'] === ''
+        || !in_array($google_identity['email_verified'], [true, 'true'], true)
+        || !filter_var($google_identity['email'], FILTER_VALIDATE_EMAIL)) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'message' => 'Google account could not be verified. Sign in with the Google account registered to your student record.']);
+        exit();
+    }
+
+    $g_email = trim($google_identity['email']);
+    if (!preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $g_email)) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'Use the Gmail address registered to your student account.']);
+        exit();
+    }
+
+    if (!is_string($requested_email)
+        || !filter_var($requested_email, FILTER_VALIDATE_EMAIL)
+        || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $requested_email)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Enter your Gmail address in the form before continuing with Google.']);
+        exit();
+    }
+    if (!hash_equals(strtolower(trim($requested_email)), strtolower($g_email))) {
+        unset(
+            $_SESSION['google_signup_email'],
+            $_SESSION['google_signup_sub'],
+            $_SESSION['google_signup_expires'],
+            $_SESSION['google_signup_name']
+        );
+        http_response_code(403);
+        echo json_encode([
+            'success' => false,
+            'email_mismatch' => true,
+            'message' => 'The Google account does not match the email you entered. Change the email or choose the matching Google account.'
+        ]);
+        exit();
+    }
+
+    $chk = $conn->prepare("SELECT id, name, email, role FROM students WHERE email = ? LIMIT 1");
+    if (!$chk) {
+        error_log('Google sign-in account lookup could not be prepared: ' . $conn->error);
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Could not check the student account. Please try again later.']);
+        exit();
+    }
     $chk->bind_param("s", $g_email);
-    $chk->execute();
-    $chk->store_result();
-    
-    if ($chk->num_rows > 0) {
-        $chk->bind_result($db_id, $db_name, $db_email, $db_role);
-        $chk->fetch();
-        $student_name = $db_name;
-        $student_email = $db_email;
-        $student_role = is_admin($db_email) ? 'admin' : ($db_role ?: 'student');
+    if (!$chk->execute()) {
+        error_log('Google sign-in account lookup failed: ' . $chk->error);
         $chk->close();
-    } else {
-        $chk->close();
-        $g_pass = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
-        $g_role = is_admin($g_email) ? 'admin' : 'student';
-        $ins = $conn->prepare("INSERT INTO students (name, email, password, role) VALUES (?, ?, ?, ?)");
-        $ins->bind_param("ssss", $g_name, $g_email, $g_pass, $g_role);
-        $ins->execute();
-        $ins->close();
-        $student_name = $g_name;
-        $student_email = $g_email;
-        $student_role = $g_role;
-        @notify_admin_new_registration($g_name, $g_email, "Google Sign-In");
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Could not check the student account. Please try again later.']);
+        exit();
     }
-    
-    $_SESSION['student_name'] = $student_name;
-    $_SESSION['student_email'] = $student_email;
-    $_SESSION['student_role'] = $student_role;
-    if (!empty($g_pic)) $_SESSION['student_picture'] = $g_pic;
-    
+    $chk->store_result();
+    if ($chk->num_rows === 0) {
+        $chk->close();
+        if (!session_regenerate_id(true)) {
+            error_log('Google signup verification succeeded but the session ID could not be regenerated.');
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'Secure registration could not be started. Please try again.']);
+            exit();
+        }
+        $_SESSION['google_signup_email'] = strtolower($g_email);
+        $_SESSION['google_signup_sub'] = $google_identity['sub'];
+        $_SESSION['google_signup_expires'] = (int)$google_identity['exp'];
+        $_SESSION['google_signup_name'] = trim((string)($google_identity['name'] ?? ''));
+        echo json_encode([
+            'success' => false,
+            'needs_registration' => true,
+            'email' => $g_email,
+            'name' => $_SESSION['google_signup_name'],
+            'message' => 'Google email verified. Complete the student registration form to create your account.'
+        ]);
+        exit();
+    }
+
+    $chk->bind_result($db_id, $db_name, $db_email, $db_role);
+    $chk->fetch();
+    $chk->close();
+
+    if (!session_regenerate_id(true)) {
+        error_log('Google sign-in succeeded but the session ID could not be regenerated.');
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Secure sign-in could not be completed. Please try again.']);
+        exit();
+    }
+    $_SESSION['google_login_csrf'] = bin2hex(random_bytes(32));
+    $_SESSION['student_id'] = $db_id;
+    $_SESSION['student_name'] = $db_name;
+    $_SESSION['student_email'] = $db_email;
+    $_SESSION['student_role'] = is_admin($db_email) ? 'admin' : ($db_role ?: 'student');
+
     echo json_encode(['success' => true]);
     exit();
 }
@@ -81,15 +186,21 @@ $is_logged_in = isset($_SESSION['student_name']) && isset($_SESSION['student_ema
 $current_name = $_SESSION['student_name'] ?? '';
 $current_email = $_SESSION['student_email'] ?? '';
 $current_pic = $_SESSION['student_picture'] ?? '';
+$current_student_gender = '';
+$current_student_university = '';
+$current_student_department = '';
+$current_student_phone = '';
+$current_student_status = 'Active';
+$current_registration_date = date('Y-m-d');
 $is_admin_user = $is_logged_in && is_admin($current_email);
 
 // Ensure fresh profile data (name, picture, role) from DB
 if ($is_logged_in) {
-    $u_chk = $conn->prepare("SELECT name, picture, role FROM students WHERE email = ? LIMIT 1");
+    $u_chk = $conn->prepare("SELECT name, picture, role, gender, university, department, phone, enrollment_status, registration_date, created_at FROM students WHERE email = ? LIMIT 1");
     if ($u_chk) {
         $u_chk->bind_param("s", $current_email);
         $u_chk->execute();
-        $u_chk->bind_result($db_u_name, $db_u_pic, $db_u_role);
+        $u_chk->bind_result($db_u_name, $db_u_pic, $db_u_role, $db_u_gender, $db_u_university, $db_u_department, $db_u_phone, $db_u_status, $db_u_registration_date, $db_u_created_at);
         if ($u_chk->fetch()) {
             if (!empty($db_u_name)) {
                 $current_name = $db_u_name;
@@ -99,6 +210,12 @@ if ($is_logged_in) {
                 $current_pic = $db_u_pic;
                 $_SESSION['student_picture'] = $current_pic;
             }
+            $current_student_gender = $db_u_gender ?? '';
+            $current_student_university = $db_u_university ?? '';
+            $current_student_department = $db_u_department ?? '';
+            $current_student_phone = $db_u_phone ?? '';
+            $current_student_status = $db_u_status ?: 'Active';
+            $current_registration_date = $db_u_registration_date ?: $db_u_created_at;
             if ($db_u_role === 'admin' || is_admin($current_email)) {
                 $is_admin_user = true;
                 $_SESSION['student_role'] = 'admin';
@@ -110,6 +227,34 @@ if ($is_logged_in) {
 
 if ($is_admin_user) {
     @$conn->query("UPDATE students SET role = 'admin' WHERE email = '" . $conn->real_escape_string($current_email) . "'");
+
+    $create_student_records_sql = "CREATE TABLE IF NOT EXISTS student_records (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        student_id VARCHAR(64) NOT NULL UNIQUE,
+        full_name VARCHAR(255) NOT NULL,
+        gender VARCHAR(30) DEFAULT '',
+        date_of_birth DATE DEFAULT NULL,
+        phone VARCHAR(50) DEFAULT '',
+        email VARCHAR(255) DEFAULT NULL,
+        university VARCHAR(255) DEFAULT '',
+        faculty VARCHAR(255) DEFAULT '',
+        department VARCHAR(255) DEFAULT '',
+        year_of_study VARCHAR(50) DEFAULT '',
+        semester VARCHAR(50) DEFAULT '',
+        academic_year VARCHAR(50) DEFAULT '',
+        student_photo VARCHAR(255) DEFAULT '',
+        registration_date DATE NOT NULL,
+        admin_email VARCHAR(255) NOT NULL,
+        status ENUM('Active', 'Inactive', 'Graduated') NOT NULL DEFAULT 'Active',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )";
+    if (!$conn->query($create_student_records_sql)) {
+        die("Could not prepare student records storage: " . htmlspecialchars($conn->error));
+    }
+    if (empty($_SESSION['student_import_csrf'])) {
+        $_SESSION['student_import_csrf'] = bin2hex(random_bytes(32));
+    }
 }
 
 $curr_hour = (int)date('H');
@@ -120,6 +265,208 @@ $time_greeting = ($curr_hour < 12) ? 'GOOD MORNING' : (($curr_hour < 17) ? 'GOOD
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
+
+    if ($action === 'import_students_csv' && $is_admin_user) {
+        $csrf_token = $_POST['csrf_token'] ?? '';
+        $upload = $_FILES['student_file'] ?? null;
+        $max_file_size = 5 * 1024 * 1024;
+
+        if (!is_string($csrf_token) || !hash_equals($_SESSION['student_import_csrf'], $csrf_token)) {
+            $alert_message = "Your upload session expired. Refresh the page and try again.";
+            $alert_type = "error";
+        } elseif (!is_array($upload) || !isset($upload['error']) || $upload['error'] !== UPLOAD_ERR_OK) {
+            $alert_message = "Choose a CSV file to upload. The upload may also have exceeded the server's file size limit.";
+            $alert_type = "error";
+        } elseif (!isset($upload['size']) || !is_numeric($upload['size']) || !is_string($upload['name'] ?? null) || !is_string($upload['tmp_name'] ?? null)) {
+            $alert_message = "The uploaded file information is invalid.";
+            $alert_type = "error";
+        } elseif ($upload['size'] > $max_file_size) {
+            $alert_message = "The CSV file must be 5 MB or smaller.";
+            $alert_type = "error";
+        } elseif (strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION)) !== 'csv' || !is_uploaded_file($upload['tmp_name'])) {
+            $alert_message = "Upload a valid CSV file.";
+            $alert_type = "error";
+        } else {
+            $csv = fopen($upload['tmp_name'], 'r');
+            if ($csv === false) {
+                $alert_message = "The uploaded CSV file could not be read.";
+                $alert_type = "error";
+            } else {
+                $headers = fgetcsv($csv);
+                if ($headers === false) {
+                    $alert_message = "The CSV file is empty.";
+                    $alert_type = "error";
+                } else {
+                    $header_map = [];
+                    foreach ($headers as $index => $header) {
+                        $header = preg_replace('/^\xEF\xBB\xBF/', '', trim((string)$header));
+                        $header_map[strtolower(preg_replace('/[^a-z0-9]/i', '', $header))] = $index;
+                    }
+
+                    if (!isset($header_map['studentid'], $header_map['fullname'])) {
+                        $alert_message = "The CSV must include Student ID and Full Name columns.";
+                        $alert_type = "error";
+                    } else {
+                        $columns = [
+                            'studentid' => 'student_id',
+                            'fullname' => 'full_name',
+                            'gender' => 'gender',
+                            'dateofbirth' => 'date_of_birth',
+                            'phonenumber' => 'phone',
+                            'phone' => 'phone',
+                            'emailaddress' => 'email',
+                            'email' => 'email',
+                            'universitycollege' => 'university',
+                            'university' => 'university',
+                            'facultycollege' => 'faculty',
+                            'faculty' => 'faculty',
+                            'department' => 'department',
+                            'yearofstudy' => 'year_of_study',
+                            'semester' => 'semester',
+                            'academicyear' => 'academic_year',
+                            'studentphoto' => 'student_photo',
+                            'registrationdate' => 'registration_date',
+                            'status' => 'status'
+                        ];
+                        $rows = [];
+                        $seen_ids = [];
+                        $line_number = 1;
+                        $import_error = '';
+
+                        while (($csv_row = fgetcsv($csv)) !== false) {
+                            $line_number++;
+                            if ($csv_row === [null] || (count($csv_row) === 1 && trim((string)$csv_row[0]) === '')) {
+                                continue;
+                            }
+                            $record = [
+                                'student_id' => '',
+                                'full_name' => '',
+                                'gender' => '',
+                                'date_of_birth' => null,
+                                'phone' => '',
+                                'email' => null,
+                                'university' => '',
+                                'faculty' => '',
+                                'department' => '',
+                                'year_of_study' => '',
+                                'semester' => '',
+                                'academic_year' => '',
+                                'student_photo' => '',
+                                'registration_date' => date('Y-m-d'),
+                                'status' => 'Active'
+                            ];
+
+                            foreach ($columns as $header_key => $field_name) {
+                                if (!isset($header_map[$header_key])) {
+                                    continue;
+                                }
+                                $value = trim((string)($csv_row[$header_map[$header_key]] ?? ''));
+                                if ($field_name === 'date_of_birth' || $field_name === 'registration_date') {
+                                    if ($value === '' && $field_name === 'date_of_birth') {
+                                        $record[$field_name] = null;
+                                    } elseif ($value !== '') {
+                                        $date = DateTime::createFromFormat('!Y-m-d', $value);
+                                        $date_errors = DateTime::getLastErrors();
+                                        if (!$date || ($date_errors && ($date_errors['warning_count'] > 0 || $date_errors['error_count'] > 0)) || $date->format('Y-m-d') !== $value) {
+                                            $import_error = "Invalid date on CSV row {$line_number}; use YYYY-MM-DD.";
+                                            break 2;
+                                        }
+                                        $record[$field_name] = $value;
+                                    }
+                                } elseif ($field_name === 'email') {
+                                    $record[$field_name] = $value === '' ? null : $value;
+                                } elseif ($field_name === 'status' && $value !== '') {
+                                    $record[$field_name] = ucfirst(strtolower($value));
+                                } else {
+                                    $record[$field_name] = $value;
+                                }
+                            }
+
+                            if ($record['student_id'] === '' || $record['full_name'] === '') {
+                                $import_error = "Student ID and Full Name are required on CSV row {$line_number}.";
+                                break;
+                            }
+                            if ($record['email'] !== null && !filter_var($record['email'], FILTER_VALIDATE_EMAIL)) {
+                                $import_error = "Invalid email address on CSV row {$line_number}.";
+                                break;
+                            }
+                            if (!in_array($record['status'], ['Active', 'Inactive', 'Graduated'], true)) {
+                                $import_error = "Status on CSV row {$line_number} must be Active, Inactive, or Graduated.";
+                                break;
+                            }
+                            if (isset($seen_ids[$record['student_id']])) {
+                                $import_error = "Duplicate Student ID on CSV row {$line_number}.";
+                                break;
+                            }
+                            $seen_ids[$record['student_id']] = true;
+                            $rows[] = $record;
+                        }
+                        fclose($csv);
+
+                        if ($import_error !== '') {
+                            $alert_message = $import_error;
+                            $alert_type = "error";
+                        } elseif (empty($rows)) {
+                            $alert_message = "The CSV contains no student records to import.";
+                            $alert_type = "error";
+                        } else {
+                            $conn->begin_transaction();
+                            $insert_stmt = $conn->prepare("INSERT INTO student_records
+                                (student_id, full_name, gender, date_of_birth, phone, email, university, faculty, department, year_of_study, semester, academic_year, student_photo, registration_date, admin_email, status)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                            if (!$insert_stmt) {
+                                $conn->rollback();
+                                $alert_message = "Could not prepare the student import: " . $conn->error;
+                                $alert_type = "error";
+                            } else {
+                                $insert_error = '';
+                                foreach ($rows as $record) {
+                                    $insert_stmt->bind_param(
+                                        "ssssssssssssssss",
+                                        $record['student_id'],
+                                        $record['full_name'],
+                                        $record['gender'],
+                                        $record['date_of_birth'],
+                                        $record['phone'],
+                                        $record['email'],
+                                        $record['university'],
+                                        $record['faculty'],
+                                        $record['department'],
+                                        $record['year_of_study'],
+                                        $record['semester'],
+                                        $record['academic_year'],
+                                        $record['student_photo'],
+                                        $record['registration_date'],
+                                        $current_email,
+                                        $record['status']
+                                    );
+                                    if (!$insert_stmt->execute()) {
+                                        $insert_error = $insert_stmt->errno === 1062
+                                            ? "A Student ID in this file is already registered."
+                                            : "Student import failed: " . $insert_stmt->error;
+                                        break;
+                                    }
+                                }
+                                $insert_stmt->close();
+                                if ($insert_error !== '') {
+                                    $conn->rollback();
+                                    $alert_message = $insert_error . " No rows were imported.";
+                                    $alert_type = "error";
+                                } else {
+                                    $conn->commit();
+                                    $alert_message = count($rows) . " student record(s) imported successfully.";
+                                    $alert_type = "success";
+                                }
+                            }
+                        }
+                    }
+                }
+                if (is_resource($csv)) {
+                    fclose($csv);
+                }
+            }
+        }
+    }
 
     // SUPER ADMIN PROFILE UPDATE (Name & Photo)
     if ($action === 'update_admin_profile' && $is_admin_user) {
@@ -155,10 +502,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $_SESSION['student_name'] = $new_admin_name;
             $current_name = $new_admin_name;
-            $alert_message = "Ragaan Super Admin (maqaa fi suuraan) milkaa'inaan haaromeera! (Super Admin profile updated successfully)";
+            $alert_message = "Super Admin profile (name & picture) updated successfully!";
             $alert_type = "success";
         } else {
-            $alert_message = "Maqaan duwwaa ta'uu hin danda'u! (Name cannot be empty)";
+            $alert_message = "Name cannot be empty!";
             $alert_type = "error";
         }
     }
@@ -186,10 +533,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit();
         } else {
             if ($success) {
-                $alert_message = "Logo university milkaa'inaan haaromeera! (Logo updated successfully)";
+                $alert_message = "University logo updated successfully!";
                 $alert_type = "success";
             } else {
-                $alert_message = "Logo fe'uun hin danda'amne! (Failed to upload logo)";
+                $alert_message = "Failed to upload university logo!";
                 $alert_type = "error";
             }
         }
@@ -207,7 +554,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['success' => true]);
             exit();
         } else {
-            $alert_message = "Logo university haqameera (Reverted to default 🎓)";
+            $alert_message = "University logo reset to default (🎓)";
             $alert_type = "success";
         }
     }
@@ -216,58 +563,101 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'register') {
         $active_auth_tab = "register";
         $fullName   = trim($_POST['fullName'] ?? '');
-        $email      = trim($_POST['email'] ?? '');
-        $password   = $_POST['password'] ?? '';
-        $confirmPassword = $_POST['confirmPassword'] ?? '';
-        $department = trim($_POST['department'] ?? 'General');
-        if (empty($department)) $department = 'General';
+        $gender     = trim($_POST['gender'] ?? '');
+        $phone      = trim($_POST['phone'] ?? '');
+        $university = trim($_POST['university'] ?? '');
+        $department = trim($_POST['department'] ?? '');
+        $email = trim($_POST['email'] ?? '');
 
-        if (empty($fullName) || empty($email) || empty($password)) {
-            $alert_message = "Hundaa guutuu qabdu! (Please fill all required fields)";
+        // Strict Ethiopian phone validation: +2519..., +2517..., 09..., 07..., 2519..., 2517...
+        $clean_phone = preg_replace('/[\s\-\(\)]+/', '', $phone);
+        $is_ethiopian_phone = preg_match('/^(?:\+251|251|0)(9\d{8}|7\d{8})$/', $clean_phone, $phone_matches);
+        $allowed_genders = ['Female', 'Male', 'Other', 'Prefer not to say'];
+
+        if (empty($fullName) || empty($gender) || empty($email) || empty($phone) || empty($university) || empty($department)) {
+            $alert_message = "Please complete all required student and university fields.";
             $alert_type = "error";
         } elseif (mb_strlen($fullName) < 3) {
-            $alert_message = "Maqaan yoo xiqqaate qubee 3 ta'uu qaba!";
+            $alert_message = "Full name must be at least 3 characters!";
+            $alert_type = "error";
+        } elseif (mb_strlen($fullName) > 255 || mb_strlen($email) > 255 || mb_strlen($phone) > 50 || mb_strlen($university) > 255 || mb_strlen($department) > 100) {
+            $alert_message = "One or more fields exceed the allowed length. Please shorten the information and try again.";
+            $alert_type = "error";
+        } elseif (!in_array($gender, $allowed_genders, true)) {
+            $alert_message = "Select a valid gender option.";
             $alert_type = "error";
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-            $alert_message = "Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com is allowed)";
+            $alert_message = "Only genuine Google (@gmail.com) accounts are allowed!";
             $alert_type = "error";
-        } elseif (strlen($password) < 6) {
-            $alert_message = "Password-n yoo xiqqaate qubee 6 ta'uu qaba!";
-            $alert_type = "error";
-        } elseif ($password !== $confirmPassword) {
-            $alert_message = "Password-n wal hin simne! (Passwords do not match)";
+        } elseif (!$is_ethiopian_phone) {
+            $alert_message = "Please enter a valid Ethiopian phone number! (e.g. 0912345678, 0712345678, or +251912345678)";
             $alert_type = "error";
         } else {
-            // Check duplicate
-            $stmt = $conn->prepare("SELECT id FROM students WHERE email = ?");
-            $stmt->bind_param("s", $email);
-            $stmt->execute();
-            $stmt->store_result();
-
-            if ($stmt->num_rows > 0) {
-                $alert_message = "Email kun duraan galmaa'ee jira! (Email already registered)";
+            // Standardize phone to 09... or 07...
+            $standard_phone = '0' . $phone_matches[1];
+            $stmt = $conn->prepare("SELECT id FROM students WHERE email = ? LIMIT 1");
+            if (!$stmt) {
+                $alert_message = "Could not validate your registration: " . $conn->error;
                 $alert_type = "error";
             } else {
-                $stmt->close();
-                $hashed = password_hash($password, PASSWORD_DEFAULT);
-                $role = is_admin($email) ? 'admin' : 'student';
+                $stmt->bind_param("s", $email);
+                $stmt->execute();
+                $stmt->store_result();
 
-                $ins = $conn->prepare("INSERT INTO students (name, email, password, role, department) VALUES (?, ?, ?, ?, ?)");
-                $ins->bind_param("sssss", $fullName, $email, $hashed, $role, $department);
-                if ($ins->execute()) {
-                    @notify_admin_new_registration($fullName, $email, "Form Galmee ($department)");
-                    
-                    // Auto login upon registration
-                    $_SESSION['student_name'] = $fullName;
-                    $_SESSION['student_email'] = $email;
-                    $_SESSION['student_role'] = $role;
-                    header("Location: index.php?registered=1");
-                    exit();
-                } else {
-                    $alert_message = "Error: " . $ins->error;
+                if ($stmt->num_rows > 0) {
+                    $alert_message = "This email is already registered!";
                     $alert_type = "error";
+                    $stmt->close();
+                } else {
+                    $stmt->close();
+                    $dummy_pass = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+                    $role = is_admin($email) ? 'admin' : 'student';
+                    $registration_date = date('Y-m-d');
+                    $status = 'Active';
+                    $ins = $conn->prepare("INSERT INTO students
+                        (name, email, password, role, department, phone, gender, university, registration_date, enrollment_status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                    if (!$ins) {
+                        $alert_message = "Could not prepare your registration: " . $conn->error;
+                        $alert_type = "error";
+                    } else {
+                        $ins->bind_param(
+                            "ssssssssss",
+                            $fullName,
+                            $email,
+                            $dummy_pass,
+                            $role,
+                            $department,
+                            $standard_phone,
+                            $gender,
+                            $university,
+                            $registration_date,
+                            $status
+                        );
+                        if ($ins->execute()) {
+                            @notify_admin_new_registration($fullName, $email, "University registration ($university | $department | Tel: $standard_phone)");
+                            $_SESSION['student_name'] = $fullName;
+                            $_SESSION['student_email'] = $email;
+                            $_SESSION['student_role'] = $role;
+                            $_SESSION['registration_success'] = true;
+                            unset(
+                                $_SESSION['google_signup_email'],
+                                $_SESSION['google_signup_sub'],
+                                $_SESSION['google_signup_expires'],
+                                $_SESSION['google_signup_name']
+                            );
+                            $ins->close();
+                            header("Location: index.php");
+                            exit();
+                        } else {
+                            $alert_message = $ins->errno === 1062
+                                ? "This email is already registered."
+                                : "Registration error: " . $ins->error;
+                            $alert_type = "error";
+                        }
+                        $ins->close();
+                    }
                 }
-                $ins->close();
             }
         }
     }
@@ -279,7 +669,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $password = $_POST['password'] ?? '';
 
         if (empty($email) || empty($password)) {
-            $alert_message = "Email fi password galchuun barbaachisaadha!";
+            $alert_message = "Please enter your email and password!";
             $alert_type = "error";
         } else {
             $stmt = $conn->prepare("SELECT id, name, email, password, role FROM students WHERE email = ?");
@@ -292,7 +682,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->fetch();
                 if (password_verify($password, $db_hash)) {
                     if (!is_admin($db_email)) {
-                        $alert_message = "Dhiifama! Sign In qophaa Administrator qofaaf heyyamama. Barattoonni fuula duraa irratti galmaa'uu qofa danda'u. (Sign in is restricted to Admins only)";
+                        $alert_message = "Sorry! Sign In is restricted to Administrators only. Students should register on the homepage.";
                         $alert_type = "error";
                     } else {
                         $_SESSION['student_id'] = $db_id;
@@ -303,11 +693,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         exit();
                     }
                 } else {
-                    $alert_message = "Password dogoggora! (Wrong password)";
+                    $alert_message = "Incorrect password!";
                     $alert_type = "error";
                 }
             } else {
-                $alert_message = "Account-n email kanaan hin argamne! (User not found)";
+                $alert_message = "No account found with this email!";
                 $alert_type = "error";
             }
             $stmt->close();
@@ -322,13 +712,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cnf_pwd = $_POST['confirm_password'] ?? '';
 
         if (empty($email) || empty($new_pwd) || empty($cnf_pwd)) {
-            $alert_message = "Hundaa guutuu qabdu!";
+            $alert_message = "Please fill in all fields!";
             $alert_type = "error";
         } elseif (strlen($new_pwd) < 6) {
-            $alert_message = "Password-n yoo xiqqaate qubee 6 ta'uu qaba!";
+            $alert_message = "Password must be at least 6 characters!";
             $alert_type = "error";
         } elseif ($new_pwd !== $cnf_pwd) {
-            $alert_message = "Password-n wal hin simne!";
+            $alert_message = "Passwords do not match!";
             $alert_type = "error";
         } else {
             $chk = $conn->prepare("SELECT id FROM students WHERE email = ?");
@@ -360,33 +750,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     elseif ($action === 'admin_add' && $is_admin_user) {
         $name       = trim($_POST['name'] ?? '');
         $email      = trim($_POST['email'] ?? '');
+        $phone      = trim($_POST['phone'] ?? '');
         $password   = $_POST['password'] ?? '';
         $role       = trim($_POST['role'] ?? 'student');
+        $gender     = trim($_POST['gender'] ?? '');
+        $university = trim($_POST['university'] ?? '');
         $department = trim($_POST['department'] ?? 'General');
-        if (empty($department)) $department = 'General';
+        $allowed_genders = ['Female', 'Male', 'Other', 'Prefer not to say'];
+        $clean_phone = preg_replace('/[\s\-\(\)]+/', '', $phone);
+        $is_ethiopian_phone = preg_match('/^(?:\+251|251|0)(9\d{8}|7\d{8})$/', $clean_phone, $phone_matches);
+        if (!in_array($role, ['student', 'admin'], true)) {
+            $role = 'student';
+        }
 
-        if (empty($name) || empty($email) || empty($password)) {
-            $alert_message = "Hundaa guutuu qabdu!";
+        if (empty($name) || empty($email) || empty($phone) || empty($university) || empty($department) || empty($gender)) {
+            $alert_message = "Please complete all required student fields.";
+            $alert_type = "error";
+        } elseif (mb_strlen($name) > 255 || mb_strlen($email) > 255 || mb_strlen($phone) > 50 || mb_strlen($university) > 255 || mb_strlen($department) > 100) {
+            $alert_message = "One or more fields exceed the allowed length.";
+            $alert_type = "error";
+        } elseif (!in_array($gender, $allowed_genders, true)) {
+            $alert_message = "Select a valid gender option.";
+            $alert_type = "error";
+        } elseif (!$is_ethiopian_phone) {
+            $alert_message = "Enter a valid Ethiopian phone number (09..., 07..., or +251...).";
+            $alert_type = "error";
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
+            $alert_message = "Enter a valid Gmail address.";
             $alert_type = "error";
         } else {
             $chk = $conn->prepare("SELECT id FROM students WHERE email = ?");
-            $chk->bind_param("s", $email);
-            $chk->execute();
-            $chk->store_result();
-            if ($chk->num_rows > 0) {
-                $alert_message = "Email kun duraan galmaa'ee jira!";
+            if (!$chk) {
+                $alert_message = "Could not validate the new student: " . $conn->error;
                 $alert_type = "error";
             } else {
-                $chk->close();
-                $h = password_hash($password, PASSWORD_DEFAULT);
-                $ins = $conn->prepare("INSERT INTO students (name, email, password, role, department) VALUES (?, ?, ?, ?, ?)");
-                $ins->bind_param("sssss", $name, $email, $h, $role, $department);
-                if ($ins->execute()) {
-                    $alert_message = "Barataan haaraa ('" . htmlspecialchars($name) . "') itti dabalameera!";
-                    $alert_type = "success";
-                    @notify_admin_new_registration($name, $email, "Admin Panel Add ($department)");
+                $chk->bind_param("s", $email);
+                $chk->execute();
+                $chk->store_result();
+                if ($chk->num_rows > 0) {
+                    $alert_message = "This email is already registered!";
+                    $alert_type = "error";
+                    $chk->close();
+                } else {
+                    $chk->close();
+                    if (!empty($password) && strlen($password) < 6) {
+                        $alert_message = "Password must be at least 6 characters long.";
+                        $alert_type = "error";
+                    } else {
+                        $phone = '0' . $phone_matches[1];
+                        $h = !empty($password) ? password_hash($password, PASSWORD_DEFAULT) : password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+                        $registration_date = date('Y-m-d');
+                        $status = 'Active';
+                        $ins = $conn->prepare("INSERT INTO students
+                            (name, email, password, role, department, phone, gender, university, registration_date, enrollment_status, registered_by_email)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                        if (!$ins) {
+                            $alert_message = "Could not prepare the new student record: " . $conn->error;
+                            $alert_type = "error";
+                        } else {
+                            $ins->bind_param("sssssssssss", $name, $email, $h, $role, $department, $phone, $gender, $university, $registration_date, $status, $current_email);
+                            if ($ins->execute()) {
+                                $alert_message = "New student ('" . htmlspecialchars($name) . "') was added successfully!";
+                                $alert_type = "success";
+                                @notify_admin_new_registration($name, $email, "Admin Panel Add ($university | $department | Tel: $phone)");
+                            } else {
+                                $alert_message = "Could not add student: " . $ins->error;
+                                $alert_type = "error";
+                            }
+                            $ins->close();
+                        }
+                    }
                 }
-                $ins->close();
             }
         }
     }
@@ -396,6 +830,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $student_id = (int)($_POST['student_id'] ?? 0);
         $name       = trim($_POST['name'] ?? '');
         $email      = trim($_POST['email'] ?? '');
+        $phone      = trim($_POST['phone'] ?? '');
         $new_pwd    = $_POST['new_password'] ?? '';
         $role       = trim($_POST['role'] ?? 'student');
         $department = trim($_POST['department'] ?? 'General');
@@ -404,14 +839,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($student_id > 0 && !empty($name) && !empty($email)) {
             if (!empty($new_pwd)) {
                 $h = password_hash($new_pwd, PASSWORD_DEFAULT);
-                $up = $conn->prepare("UPDATE students SET name = ?, email = ?, password = ?, role = ?, department = ? WHERE id = ?");
-                $up->bind_param("sssssi", $name, $email, $h, $role, $department, $student_id);
+                $up = $conn->prepare("UPDATE students SET name = ?, email = ?, password = ?, role = ?, department = ?, phone = ? WHERE id = ?");
+                $up->bind_param("ssssssi", $name, $email, $h, $role, $department, $phone, $student_id);
             } else {
-                $up = $conn->prepare("UPDATE students SET name = ?, email = ?, role = ?, department = ? WHERE id = ?");
-                $up->bind_param("ssssi", $name, $email, $role, $department, $student_id);
+                $up = $conn->prepare("UPDATE students SET name = ?, email = ?, role = ?, department = ?, phone = ? WHERE id = ?");
+                $up->bind_param("sssssi", $name, $email, $role, $department, $phone, $student_id);
             }
             if ($up->execute()) {
-                $alert_message = "Ragaan barataa milkaa'inaan haaromeera! (Updated successfully)";
+                $alert_message = "Student record updated successfully!";
                 $alert_type = "success";
             }
             $up->close();
@@ -425,7 +860,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $del = $conn->prepare("DELETE FROM students WHERE id = ? AND email != ?");
             $del->bind_param("is", $student_id, $current_email);
             if ($del->execute()) {
-                $alert_message = "Barataan milkaa'inaan haqameera! (Student deleted)";
+                $alert_message = "Student deleted successfully!";
                 $alert_type = "success";
             }
             $del->close();
@@ -441,7 +876,7 @@ if ($is_admin_user) {
     @$conn->query("DELETE FROM students WHERE email LIKE '%admin123%' OR name LIKE '%admin123%'");
     @$conn->query("DELETE FROM notifications WHERE student_email LIKE '%admin4566%' OR student_email LIKE '%admin123%' OR message LIKE '%admin4566%' OR message LIKE '%admin123%'");
 
-    $res = $conn->query("SELECT id, name, email, role, department, created_at FROM students ORDER BY id DESC");
+    $res = $conn->query("SELECT id, name, email, phone, role, university, department, gender, enrollment_status, registration_date, created_at FROM students ORDER BY id ASC");
     if ($res) {
         while ($row = $res->fetch_assoc()) {
             $em_lower = strtolower(trim($row['email'] ?? ''));
@@ -503,22 +938,136 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
   <script src="https://cdn.tailwindcss.com"></script>
 
   <style>
+    /* Base typography & smooth rendering */
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
+
     .card-bg {
       background-size: cover;
       background-position: center;
       background-repeat: no-repeat;
       background-color: #064e3b;
-      transition: background-image 0.4s ease-in-out;
+      transition: background-image 0.4s ease-in-out, transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.35s ease;
     }
+    .card-bg:hover {
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 30px rgba(16, 185, 129, 0.15);
+    }
+
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-8px); }
       to { opacity: 1; transform: translateY(0); }
     }
     .animate-fade-in {
       animation: fadeIn 0.25s ease-out forwards;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       GLOBAL HOVER EFFECTS & MICRO-INTERACTIONS
+       ══════════════════════════════════════════════════════════════ */
+
+    /* Smooth transitions for all interactive elements */
+    button, a, input, select, textarea, .admin-nav-item, .student-row, .stat-card, .site-logo-icon, .site-logo-badge {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Interactive Buttons Hover Elevation & Glow */
+    button:not(:disabled):hover, a[class*="bg-"]:hover {
+      transform: translateY(-2px);
+    }
+    button:not(:disabled):active, a[class*="bg-"]:active {
+      transform: translateY(0) scale(0.97);
+    }
+
+    /* Green / Emerald Theme Button Hover Glow */
+    button[type="submit"]:hover, .hover-glow-green:hover {
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.35), 0 0 15px rgba(16, 185, 129, 0.2);
+    }
+
+    /* Red / Crimson Theme Button Hover Glow */
+    button[class*="bg-red"]:hover, .hover-glow-red:hover {
+      box-shadow: 0 10px 25px -5px rgba(239, 68, 68, 0.4), 0 0 18px rgba(239, 68, 68, 0.25);
+    }
+
+    /* Blue Theme Button Hover Glow */
+    button[class*="bg-blue"]:hover {
+      box-shadow: 0 8px 20px -4px rgba(59, 130, 246, 0.35);
+    }
+
+    /* Arrow icon translation on button hover */
+    button:hover .hover-arrow, a:hover .hover-arrow, .group:hover .group-hover-arrow {
+      transform: translateX(4px);
+      transition: transform 0.2s ease-out;
+    }
+
+    /* Stat Cards Hover Lift & Border Shimmer */
+    .stat-card {
+      transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+    .stat-card:hover {
+      transform: translateY(-5px);
+      border-color: rgba(239, 68, 68, 0.45);
+      box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.5), 0 0 25px rgba(239, 68, 68, 0.15);
+    }
+    .stat-card:hover .stat-icon {
+      transform: scale(1.15) rotate(6deg);
+    }
+    .stat-icon {
+      transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.3s ease;
+    }
+
+    /* Sidebar Navigation Links Hover Slide */
+    .admin-nav-item {
+      position: relative;
+      transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s ease, color 0.2s ease;
+    }
+    .admin-nav-item:hover {
+      transform: translateX(5px);
+    }
+    .admin-nav-item span:first-child {
+      display: inline-block;
+      transition: transform 0.22s ease;
+    }
+    .admin-nav-item:hover span:first-child {
+      transform: scale(1.22);
+    }
+
+    /* Directory Table Row Hover Highlight */
+    .student-row {
+      transition: background-color 0.2s ease, transform 0.2s ease;
+    }
+    .student-row:hover {
+      background-color: rgba(255, 255, 255, 0.07) !important;
+    }
+    .student-row:hover td:first-child {
+      color: #f87171;
+    }
+    .student-row .rounded-full {
+      transition: transform 0.25s ease;
+    }
+    .student-row:hover .rounded-full {
+      transform: scale(1.15);
+    }
+
+    /* University Logo & Badge Hover Bounce */
+    .site-logo-icon, .site-logo-badge, #dashLogoPreview {
+      transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease;
+    }
+    .site-logo-icon:hover, .site-logo-badge:hover, #dashLogoPreview:hover {
+      transform: scale(1.08) rotate(2deg);
+      box-shadow: 0 0 25px rgba(16, 185, 129, 0.45);
+    }
+
+    /* Close & Dismiss Buttons Hover Rotate */
+    button[onclick*="close"]:hover, button[onclick*="parentElement.remove"]:hover {
+      transform: rotate(90deg) scale(1.2);
+      transition: transform 0.2s ease;
+    }
+
+    /* Form Fields Hover Border Accent */
+    input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled) {
+      border-color: rgba(255, 255, 255, 0.3);
     }
   </style>
 </head>
@@ -582,9 +1131,11 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
       </div>
     <?php endif; ?>
 
-    <?php if(isset($_GET['registered'])): ?>
-      <div class="mb-6 p-4 rounded-xl text-xs font-medium bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-center max-w-xl mx-auto animate-fade-in">
-        🎉 Galmeen keessan milkaa'inaan raawwatameera! (Registration successful!)
+    <?php if($registration_success): ?>
+      <div role="status" aria-live="polite" class="mb-6 p-5 rounded-2xl bg-emerald-500/15 border border-emerald-400/40 text-emerald-100 text-center max-w-xl mx-auto shadow-lg shadow-emerald-950/20 animate-fade-in">
+        <div class="text-3xl mb-2" aria-hidden="true">🎉</div>
+        <h2 class="text-lg font-bold mb-1">Galmeen keessan milkaa’inaan xumurame!</h2>
+        <p class="text-sm text-emerald-100/90">Baga gara Alnasrii University dhuftan. Odeeffannoon galmee keessanii milkaa’inaan kuufameera.</p>
       </div>
     <?php endif; ?>
 
@@ -592,7 +1143,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
     <!-- VIEW 1: UNAUTHENTICATED (ALL-IN-ONE CARD: REGISTER / LOGIN)   -->
     <!-- ============================================================== -->
     <?php if(!$is_logged_in): ?>
-      <div class="max-w-md mx-auto my-4">
+      <div class="max-w-2xl mx-auto my-4">
 
         <!-- Card with dynamic background photo -->
         <div id="cardBg" class="card-bg relative w-full rounded-2xl shadow-2xl overflow-hidden border border-white/10 transition-all duration-300">
@@ -611,52 +1162,65 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               </div>
               <h1 class="text-3xl font-extrabold text-white tracking-tight mb-1">Alnasrii University</h1>
               <p class="text-green-200 text-xs font-medium">Create Your Student Account</p>
+              <p id="googleSignupNotice" class="<?php echo !empty($_SESSION['google_signup_email']) && (int)($_SESSION['google_signup_expires'] ?? 0) > time() ? 'mt-3 rounded-lg border border-emerald-300/30 bg-emerald-950/40 px-3 py-2 text-xs text-emerald-100' : 'hidden mt-3 rounded-lg border border-emerald-300/30 bg-emerald-950/40 px-3 py-2 text-xs text-emerald-100'; ?>"><?php
+                if (!empty($_SESSION['google_signup_email']) && (int)($_SESSION['google_signup_expires'] ?? 0) > time()) {
+                    echo 'Google account verified. Complete the student registration form below.';
+                }
+              ?></p>
             </div>
 
             <!-- ================= CREATE ACCOUNT FORM ================= -->
-            <form id="authRegisterForm" method="POST" action="index.php" class="space-y-4" novalidate>
+            <form id="authRegisterForm" method="POST" action="index.php" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <input type="hidden" name="action" value="register">
+
+              <!-- Enter the email before verifying it with Google -->
+              <div class="sm:col-span-2">
+                <div class="flex items-center justify-between mb-1.5">
+                  <label for="regEmail" class="text-white text-xs font-semibold uppercase tracking-wider">Email Address</label>
+                  <span class="text-[11px] text-green-200/90 font-mono">Google verification is not required</span>
+                </div>
+                <input id="regEmail" name="email" type="email" value="<?php echo htmlspecialchars(trim($_POST['email'] ?? (!empty($_SESSION['google_signup_email']) && (int)($_SESSION['google_signup_expires'] ?? 0) > time() ? $_SESSION['google_signup_email'] : ''))); ?>" placeholder="student@gmail.com" required pattern=".+@gmail\.com$" class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
+              </div>
 
               <!-- Full Name -->
               <div>
                 <label class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Full Name</label>
-                <input id="regFullName" name="fullName" type="text" placeholder="e.g. Guuta Ahmed" required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
+                <input id="regFullName" name="fullName" type="text" value="<?php echo !empty($_SESSION['google_signup_email']) && (int)($_SESSION['google_signup_expires'] ?? 0) > time() ? htmlspecialchars($_SESSION['google_signup_name'] ?? '') : ''; ?>" placeholder="e.g. Guuta Ahmed" required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
               </div>
 
-              <!-- Email -->
+              <!-- Phone Number -->
               <div>
                 <div class="flex items-center justify-between mb-1.5">
-                  <label class="text-white text-xs font-semibold uppercase tracking-wider">Email Address</label>
-                  <span class="text-[11px] text-green-200/90 font-mono">(@gmail.com)</span>
+                  <label class="text-white text-xs font-semibold uppercase tracking-wider">Phone Number</label>
+                  <span class="text-[11px] text-green-200/90 font-mono">(09... / 07... / +251...)</span>
                 </div>
-                <input id="regEmail" name="email" type="email" placeholder="student@gmail.com" required pattern=".+@gmail\.com$" class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
+                <input id="regPhone" name="phone" type="tel" placeholder="0912345678 or +251912345678" pattern="^(\+251|251|0)(9\d{8}|7\d{8})$" title="Enter a valid Ethiopian phone number: 09..., 07..., or +251..." required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
               </div>
 
-              <!-- Department -->
               <div>
-                <label class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Department (Kutaa Barnootaa)</label>
-                <input id="regDepartment" name="department" type="text" placeholder="Department keessan barreessaa..." required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
+                <label for="regGender" class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Gender</label>
+                <select id="regGender" name="gender" required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm">
+                  <option value="">Select gender</option>
+                  <option value="Female">Female</option>
+                  <option value="Male">Male</option>
+                  <option value="Other">Other</option>
+                  <option value="Prefer not to say">Prefer not to say</option>
+                </select>
               </div>
 
-              <!-- Password -->
               <div>
-                <label class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Password</label>
-                <div class="relative">
-                  <input id="regPassword" name="password" type="password" placeholder="At least 6 characters" required minlength="6" class="w-full px-4 py-2.5 pr-14 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
-                  <button type="button" data-toggle="regPassword" class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-gray-500 hover:text-gray-800 text-xs font-semibold">Show</button>
-                </div>
+                <label for="regUniversity" class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">University / College</label>
+                <input id="regUniversity" name="university" type="text" maxlength="255" placeholder="University or college name" required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
               </div>
 
-              <!-- Confirm Password -->
               <div>
-                <label class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Confirm Password</label>
-                <div class="relative">
-                  <input id="regConfirmPassword" name="confirmPassword" type="password" placeholder="Repeat your password" required minlength="6" class="w-full px-4 py-2.5 pr-14 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
-                  <button type="button" data-toggle="regConfirmPassword" class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-gray-500 hover:text-gray-800 text-xs font-semibold">Show</button>
-                </div>
+                <label for="regDepartment" class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Department</label>
+                <input id="regDepartment" name="department" type="text" maxlength="100" placeholder="e.g. Computer Science" required class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 shadow-sm" />
               </div>
 
-              <button type="submit" class="w-full mt-2 bg-white text-green-800 font-bold py-3 rounded-lg shadow-lg hover:bg-green-50 active:scale-[0.99] transition text-sm flex items-center justify-center gap-2">
+              <p class="sm:col-span-2 text-[11px] text-green-100/80">Registration date is recorded automatically when you submit. Your enrollment status starts as Active.</p>
+
+              <button id="createAccountBtn" type="submit" class="w-full sm:col-span-2 mt-2 bg-white text-green-800 font-bold py-3 rounded-lg shadow-lg hover:bg-green-50 active:scale-[0.99] transition text-sm flex items-center justify-center gap-2">
                 <span>Create Account</span>
                 <span>&rarr;</span>
               </button>
@@ -665,7 +1229,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <!-- Link to Separate Sign In Page -->
             <div class="mt-4 pt-3 text-center">
               <p class="text-white/90 text-xs">
-                Duraan account qabduu? (Already have an account?)
+                Already have an account?
                 <a href="login.php" class="text-white font-bold underline underline-offset-2 hover:text-green-200 transition ml-1">
                   Sign In &rarr;
                 </a>
@@ -676,37 +1240,12 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <div class="mt-6 pt-5 border-t border-white/20 space-y-4">
               <div class="flex items-center gap-3">
                 <div class="flex-1 h-px bg-white/20"></div>
-                <span class="text-white/70 text-[11px] uppercase tracking-wider font-semibold">or continue with</span>
+                <span class="text-white/70 text-[11px] uppercase tracking-wider font-semibold">Google sign-in (optional)</span>
                 <div class="flex-1 h-px bg-white/20"></div>
               </div>
 
-              <!-- Google + GitHub -->
-              <div class="grid grid-cols-2 gap-3">
-                <button type="button" id="googleCustomBtn" class="flex items-center justify-center gap-2 bg-white text-gray-700 font-semibold py-2.5 px-3 rounded-lg shadow hover:bg-gray-100 transition text-xs">
-                  <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                  </svg>
-                  <span>Google</span>
-                </button>
-
-                <button type="button" onclick="alert('Alnasrii University GitHub OAuth tajaajilli yeroo dhiyootti ni eegala.')" class="flex items-center justify-center gap-2 bg-slate-900/90 hover:bg-slate-900 text-white font-semibold py-2.5 px-3 rounded-lg shadow border border-white/10 transition text-xs">
-                  <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.05-.02-2.06-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.25 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22 0 1.61-.01 2.9-.01 3.29 0 .32.21.7.83.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
-                  </svg>
-                  <span>GitHub</span>
-                </button>
-              </div>
-
-              <div id="g_id_onload"
-                   data-client_id="<?php echo htmlspecialchars($google_client_id); ?>"
-                   data-context="signin"
-                   data-ux_mode="popup"
-                   data-callback="handleGoogleResponse"
-                   data-auto_prompt="false"
-                   style="display:none;">
+              <div class="flex justify-center">
+                <div id="googleButtonContainer" class="min-h-10 w-full flex justify-center"></div>
               </div>
             </div>
 
@@ -726,9 +1265,9 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <span class="site-logo-fallback">🎓</span>
           <?php endif; ?>
         </div>
-        <h2 class="text-2xl font-bold text-white mb-2">Registration Successful!</h2>
+        <h2 class="text-2xl font-bold text-white mb-2">Baga Nagaan Dhuftan!</h2>
         <p class="text-emerald-300 font-medium text-sm mb-4">
-          Baga Nagaan Dhufte, <?php echo htmlspecialchars($current_name); ?>!
+          Welcome, <?php echo htmlspecialchars($current_name); ?>!
         </p>
 
         <div class="p-4 rounded-xl bg-white/5 border border-white/10 text-left text-xs space-y-2 mb-6">
@@ -740,14 +1279,34 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <span class="text-slate-400">Registered Email:</span>
             <span class="font-bold text-white"><?php echo htmlspecialchars($current_email); ?></span>
           </div>
+          <div class="flex justify-between gap-4 py-1 border-b border-white/10">
+            <span class="text-slate-400">Phone Number:</span>
+            <span class="font-bold text-white"><?php echo htmlspecialchars($current_student_phone ?: 'Not provided'); ?></span>
+          </div>
+          <div class="flex justify-between gap-4 py-1 border-b border-white/10">
+            <span class="text-slate-400">Gender:</span>
+            <span class="font-bold text-white"><?php echo htmlspecialchars($current_student_gender ?: 'Not provided'); ?></span>
+          </div>
+          <div class="flex justify-between gap-4 py-1 border-b border-white/10">
+            <span class="text-slate-400">University / College:</span>
+            <span class="text-right font-bold text-white"><?php echo htmlspecialchars($current_student_university ?: 'Not provided'); ?></span>
+          </div>
+          <div class="flex justify-between gap-4 py-1 border-b border-white/10">
+            <span class="text-slate-400">Department:</span>
+            <span class="text-right font-bold text-white"><?php echo htmlspecialchars($current_student_department ?: 'Not provided'); ?></span>
+          </div>
+          <div class="flex justify-between gap-4 py-1 border-b border-white/10">
+            <span class="text-slate-400">Registration Date:</span>
+            <span class="font-bold text-white"><?php echo htmlspecialchars(date('M d, Y', strtotime($current_registration_date))); ?></span>
+          </div>
           <div class="flex justify-between py-1">
             <span class="text-slate-400">Status:</span>
-            <span class="text-emerald-400 font-bold">Mirkanaa'eera (Active Student)</span>
+            <span class="text-emerald-400 font-bold"><?php echo htmlspecialchars($current_student_status); ?></span>
           </div>
         </div>
 
         <div class="p-4 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs text-left mb-6 leading-relaxed">
-          ℹ️ <strong>Hubachiisa:</strong> Galmeen keessan milkaa'inaan Alnasrii University irratti raawwatameera. Fuulli bulchiinsaa (CRUD Dashboard) qondaaltota Admin qofaaf heyyamama.
+          ℹ️ Odeeffannoo barataa keessan armaan olitti ilaaluu dandeessu. Dashboard bulchiinsaa admin hayyama qabu qofatu fayyadama.
         </div>
 
         <div class="flex justify-center gap-3">
@@ -809,13 +1368,19 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 <span>Student Directory</span>
               </button>
 
-              <!-- 3. Add Student -->
+              <!-- 3. Upload Student Records -->
+              <button type="button" id="navItem_student_upload" onclick="adminNav('student_upload')" class="admin-nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
+                <span class="text-base">📤</span>
+                <span>Upload Student CSV</span>
+              </button>
+
+              <!-- 4. Add Student -->
               <button type="button" id="navItem_add" onclick="adminNav('add_student')" class="admin-nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
                 <span class="text-base">➕</span>
                 <span>Add Student</span>
               </button>
 
-              <!-- 4. Notifications -->
+              <!-- 5. Notifications -->
               <button type="button" id="navItem_notifications" onclick="adminNav('notifications')" class="admin-nav-item w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
                 <div class="flex items-center gap-3">
                   <span class="text-base">🔔</span>
@@ -828,19 +1393,19 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 <?php endif; ?>
               </button>
 
-              <!-- 5. University Logo -->
+              <!-- 6. University Logo -->
               <button type="button" id="navItem_logo" onclick="adminNav('logo')" class="admin-nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
                 <span class="text-base">🏷️</span>
                 <span>University Logo</span>
               </button>
 
-              <!-- 6. Background & Size -->
+              <!-- 7. Background & Size -->
               <button type="button" id="navItem_bg" onclick="adminNav('background')" class="admin-nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
                 <span class="text-base">🖼️</span>
                 <span>Background & Size</span>
               </button>
 
-              <!-- 7. Admin Profile -->
+              <!-- 8. Admin Profile -->
               <button type="button" id="navItem_profile" onclick="adminNav('profile')" class="admin-nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/5 transition text-left cursor-pointer active:scale-95">
                 <span class="text-base">👤</span>
                 <span>Admin Profile</span>
@@ -981,37 +1546,37 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <!-- ══════════════════════════════════════════════════════════ -->
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
               <!-- Stat 1: Total Students -->
-              <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between">
+              <div onclick="adminNav('students')" class="stat-card group bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between cursor-pointer">
                 <div>
-                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider">Total Students</p>
+                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider group-hover:text-red-300 transition">Total Students</p>
                   <p class="text-3xl font-extrabold text-white mt-1.5"><?php echo $total_students; ?></p>
                   <p class="text-[11px] text-red-400 font-medium mt-1">Enrolled & Active</p>
                 </div>
-                <div class="w-12 h-12 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-400 flex items-center justify-center text-2xl shrink-0">
+                <div class="stat-icon w-12 h-12 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-400 flex items-center justify-center text-2xl shrink-0 group-hover:bg-red-500/25">
                   👥
                 </div>
               </div>
 
               <!-- Stat 2: System Access -->
-              <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between">
+              <div class="stat-card group bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between cursor-default">
                 <div>
-                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider">System Access</p>
+                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider group-hover:text-amber-300 transition">System Access</p>
                   <p class="text-xl font-extrabold text-amber-400 mt-1.5">Full CRUD Power</p>
                   <p class="text-[11px] text-amber-400/80 font-medium mt-1">Add, Update, Delete</p>
                 </div>
-                <div class="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center text-2xl shrink-0">
+                <div class="stat-icon w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center text-2xl shrink-0 group-hover:bg-amber-500/25">
                   ⚡
                 </div>
               </div>
 
               <!-- Stat 3: Notifications -->
-              <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between">
+              <div onclick="adminNav('notifications')" class="stat-card group bg-slate-900/80 border border-white/10 rounded-2xl p-5 shadow-lg flex items-center justify-between cursor-pointer">
                 <div>
-                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider">Notifications</p>
+                  <p class="text-[11px] uppercase text-slate-400 font-bold tracking-wider group-hover:text-emerald-300 transition">Notifications</p>
                   <p class="text-3xl font-extrabold text-emerald-400 mt-1.5"><?php echo count($notifications); ?></p>
                   <p class="text-[11px] text-emerald-400/80 font-medium mt-1">Recent Activity Logs</p>
                 </div>
-                <div class="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center text-2xl shrink-0">
+                <div class="stat-icon w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center text-2xl shrink-0 group-hover:bg-emerald-500/25">
                   🔔
                 </div>
               </div>
@@ -1025,15 +1590,15 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
-                    <h2 class="text-lg font-bold text-white tracking-tight">Recent Students (Directory)</h2>
+                    <h2 class="text-lg font-bold text-white tracking-tight">Student Directory</h2>
                   </div>
-                  <p class="text-xs text-slate-400 mt-1">Barattoota haaraa dabalii, kan jiran gulaali (update), ykn haqi (delete).</p>
+                  <p class="text-xs text-slate-400 mt-1">Students are listed from earliest to latest registration. IDs follow the registration sequence.</p>
                 </div>
 
                 <div class="flex items-center gap-3">
                   <!-- Search Filter -->
                   <div class="relative w-full sm:w-64">
-                    <input type="text" id="studentSearch" placeholder="Search name or email..." class="w-full px-3.5 py-2 pl-9 rounded-xl bg-slate-950/80 border border-white/10 text-white placeholder-slate-400 text-xs outline-none focus:ring-2 focus:ring-red-500" />
+                    <input type="text" id="studentSearch" placeholder="Search name, email, phone, or department..." class="w-full px-3.5 py-2 pl-9 rounded-xl bg-slate-950/80 border border-white/10 text-white placeholder-slate-400 text-xs outline-none focus:ring-2 focus:ring-red-500" />
                     <span class="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
                   </div>
 
@@ -1048,11 +1613,15 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 <table class="w-full text-left text-xs">
                   <thead class="bg-slate-950/80 text-slate-400 uppercase text-[11px] tracking-wider border-b border-white/10">
                     <tr>
-                      <th class="py-3 px-4">ID</th>
+                      <th class="py-3 px-4">Registration ID</th>
                       <th class="py-3 px-4">Student Name</th>
+                      <th class="py-3 px-4">University / College</th>
                       <th class="py-3 px-4">Department</th>
+                      <th class="py-3 px-4">Gender</th>
                       <th class="py-3 px-4">Email</th>
+                      <th class="py-3 px-4">Phone</th>
                       <th class="py-3 px-4">Role</th>
+                      <th class="py-3 px-4">Status</th>
                       <th class="py-3 px-4">Joined Date</th>
                       <th class="py-3 px-4 text-center">Actions</th>
                     </tr>
@@ -1060,11 +1629,11 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                   <tbody class="divide-y divide-white/5">
                     <?php if(empty($all_students)): ?>
                       <tr>
-                        <td colspan="7" class="py-8 text-center text-slate-400">Barataan galmaa'e hin jiru.</td>
+                        <td colspan="11" class="py-8 text-center text-slate-400">No students registered yet.</td>
                       </tr>
                     <?php else: ?>
                       <?php foreach($all_students as $st): ?>
-                        <tr class="student-row hover:bg-white/5 transition" data-name="<?php echo htmlspecialchars(strtolower($st['name'])); ?>" data-email="<?php echo htmlspecialchars(strtolower($st['email'])); ?>" data-department="<?php echo htmlspecialchars(strtolower($st['department'] ?? '')); ?>">
+                        <tr class="student-row hover:bg-white/5 transition" data-name="<?php echo htmlspecialchars(strtolower($st['name'])); ?>" data-email="<?php echo htmlspecialchars(strtolower($st['email'])); ?>" data-department="<?php echo htmlspecialchars(strtolower($st['department'] ?? '')); ?>" data-phone="<?php echo htmlspecialchars(strtolower($st['phone'] ?? '')); ?>">
                           <td class="py-3 px-4 font-mono text-slate-400">#<?php echo $st['id']; ?></td>
                           <td class="py-3 px-4 font-semibold text-white flex items-center gap-2.5">
                             <div class="w-7 h-7 rounded-full bg-red-500/20 text-red-300 font-bold flex items-center justify-center text-xs">
@@ -1072,13 +1641,16 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                             </div>
                             <span><?php echo htmlspecialchars($st['name']); ?></span>
                           </td>
+                          <td class="py-3 px-4 text-slate-200"><?php echo htmlspecialchars($st['university'] ?: '-'); ?></td>
                           <td class="py-3 px-4">
                             <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-white/5 border border-white/10 text-slate-200 font-medium text-[11px]">
                               <span>🎓</span>
                               <span><?php echo htmlspecialchars($st['department'] ?? 'General'); ?></span>
                             </span>
                           </td>
+                          <td class="py-3 px-4 text-slate-300"><?php echo htmlspecialchars($st['gender'] ?: '-'); ?></td>
                           <td class="py-3 px-4 text-slate-300"><?php echo htmlspecialchars($st['email']); ?></td>
+                          <td class="py-3 px-4 font-mono text-emerald-300 text-xs"><?php echo htmlspecialchars($st['phone'] ?? '-'); ?></td>
                           <td class="py-3 px-4">
                             <?php if($st['role'] === 'admin'): ?>
                               <span class="bg-red-500/20 text-red-300 border border-red-500/30 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">Admin</span>
@@ -1086,7 +1658,10 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                               <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full text-[10px] font-medium">Student</span>
                             <?php endif; ?>
                           </td>
-                          <td class="py-3 px-4 text-slate-400"><?php echo date("M d, Y", strtotime($st['created_at'])); ?></td>
+                          <td class="py-3 px-4">
+                            <span class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"><?php echo htmlspecialchars($st['enrollment_status'] ?: 'Active'); ?></span>
+                          </td>
+                          <td class="py-3 px-4 text-slate-400"><?php echo date("M d, Y", strtotime($st['registration_date'] ?: $st['created_at'])); ?></td>
                           <td class="py-3 px-4 text-center">
                             <div class="inline-flex items-center gap-2">
                               <button onclick='openEditModal(<?php echo json_encode($st); ?>)' class="bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-500/30 px-2.5 py-1 rounded-lg text-xs font-medium transition">
@@ -1105,6 +1680,33 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               </div>
             </div>
 
+            <!-- STUDENT RECORD FILE UPLOAD -->
+            <section id="studentUploadSection" class="bg-slate-900/80 border border-white/10 rounded-2xl p-6 shadow-xl scroll-mt-20">
+              <div class="mb-5">
+                <h2 class="text-base font-bold text-white tracking-tight flex items-center gap-2">
+                  <span>📤</span> Upload Student Records
+                </h2>
+                <p class="mt-1 text-xs leading-relaxed text-slate-400">
+                  Import a CSV file up to 5 MB. Student ID and Full Name are required; other columns are optional.
+                  Dates must use YYYY-MM-DD. Imported records do not create student login accounts.
+                </p>
+              </div>
+
+              <form method="POST" action="index.php#studentUploadSection" enctype="multipart/form-data" class="flex flex-col gap-4 sm:flex-row sm:items-end">
+                <input type="hidden" name="action" value="import_students_csv">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['student_import_csrf']); ?>">
+                <div class="min-w-0 flex-1">
+                  <label for="studentCsv" class="mb-1 block text-xs font-semibold uppercase text-slate-300">CSV file</label>
+                  <input id="studentCsv" type="file" name="student_file" accept=".csv,text/csv" required class="block w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-xs text-slate-200 file:mr-3 file:rounded-lg file:border-0 file:bg-red-600 file:px-3 file:py-2 file:text-xs file:font-bold file:text-white">
+                </div>
+                <button type="submit" class="rounded-xl bg-red-600 px-5 py-2.5 text-xs font-bold text-white shadow-lg hover:bg-red-500">Import CSV</button>
+              </form>
+              <p class="mt-4 text-[11px] leading-relaxed text-slate-500">
+                Headers: <code class="text-slate-300">student_id, full_name, gender, date_of_birth, phone_number, email_address, university_college, faculty_college, department, year_of_study, semester, academic_year, student_photo, registration_date, status</code>.
+                Status can be Active, Inactive, or Graduated. Existing Student IDs are not overwritten; an invalid row cancels the entire import.
+              </p>
+            </section>
+
             <!-- ══════════════════════════════════════════════════════════ -->
             <!-- RECENT NOTIFICATIONS & SYSTEM LOGS                         -->
             <!-- ══════════════════════════════════════════════════════════ -->
@@ -1118,7 +1720,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               </div>
               <div class="space-y-2.5">
                 <?php if(empty($notifications)): ?>
-                  <p class="text-xs text-slate-400 py-3">Gabaasni haaraan hin jiru.</p>
+                  <p class="text-xs text-slate-400 py-3">No recent notifications.</p>
                 <?php else: ?>
                   <?php foreach($notifications as $n): ?>
                     <div class="p-3.5 rounded-xl bg-white/5 border border-white/5 flex items-start justify-between gap-4 text-xs hover:bg-white/10 transition">
@@ -1137,7 +1739,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             </div>
 
             <!-- ══════════════════════════════════════════════════════════ -->
-            <!-- UNIVERSITY LOGO PHOTO UPLOADER (Fuula Hundarratti)         -->
+            <!-- UNIVERSITY LOGO PHOTO UPLOADER                             -->
             <!-- ══════════════════════════════════════════════════════════ -->
             <div id="logoSection" class="bg-slate-900/80 border border-white/10 rounded-2xl p-6 shadow-xl scroll-mt-20">
               <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1150,8 +1752,8 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                     <?php endif; ?>
                   </div>
                   <div>
-                    <h3 class="font-bold text-white text-sm flex items-center gap-2">🏷️ University Logo Photo (Fuula Hundarratti)</h3>
-                    <p class="text-xs text-slate-400 mt-1">Logo kompitara kee irraa filadhuutii fuula hundarratti (Sign In, Create Account, fi Dashboard) jijjiiri. Yeroo namni biraa administration qabates update godhee fayyadamuu danda'a.</p>
+                    <h3 class="font-bold text-white text-sm flex items-center gap-2">🏷️ University Logo (Site-wide)</h3>
+                    <p class="text-xs text-slate-400 mt-1">Upload a custom university logo from your device. It appears on Sign In, Create Account, and Dashboard pages for all users.</p>
                   </div>
                 </div>
                 <div class="flex items-center gap-3 shrink-0">
@@ -1179,7 +1781,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div>
                   <h3 class="font-bold text-white text-sm flex items-center gap-2">🖼️ Dashboard Background Photo</h3>
-                  <p class="text-xs text-slate-400 mt-1">Suuraa kompitara kee irraa filadhuutii background godhii jijjiiri. Bal'ina (size) isaas filattee xiqqeessuu dandeessa.</p>
+                  <p class="text-xs text-slate-400 mt-1">Upload a custom background picture from your computer and adjust its display size anytime.</p>
                 </div>
                 <div class="flex items-center gap-3 shrink-0">
                   <label for="dashBgUpload" class="cursor-pointer bg-red-600 hover:bg-red-500 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 shadow-lg transition active:scale-95">
@@ -1192,15 +1794,15 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 </div>
               </div>
 
-              <!-- Size Controls (Size isii xiqeessuuf) -->
+              <!-- Size Controls -->
               <div class="mt-4 pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 text-xs">
                 <span class="text-slate-300 font-semibold flex items-center gap-1.5">
-                  <span>📐</span> Size Suuraa (Background Size):
+                  <span>📐</span> Background Display Size:
                 </span>
                 <div class="inline-flex rounded-xl bg-black/40 p-1 border border-white/10 gap-1">
-                  <button type="button" onclick="setBgSize('240px auto')" id="btnSizeSmall" class="px-3 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">Xiqqaata (240px)</button>
-                  <button type="button" onclick="setBgSize('360px auto')" id="btnSizeMedium" class="px-3 py-1 rounded-lg text-xs font-semibold bg-red-600 text-white shadow">Giddu-galeessa (360px)</button>
-                  <button type="button" onclick="setBgSize('520px auto')" id="btnSizeLarge" class="px-3 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">Guddaa (520px)</button>
+                  <button type="button" onclick="setBgSize('240px auto')" id="btnSizeSmall" class="px-3 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">Small (240px)</button>
+                  <button type="button" onclick="setBgSize('360px auto')" id="btnSizeMedium" class="px-3 py-1 rounded-lg text-xs font-semibold bg-red-600 text-white shadow">Medium (360px)</button>
+                  <button type="button" onclick="setBgSize('520px auto')" id="btnSizeLarge" class="px-3 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">Large (520px)</button>
                   <button type="button" onclick="setBgSize('cover')" id="btnSizeCover" class="px-3 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">Full Cover</button>
                 </div>
               </div>
@@ -1219,7 +1821,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
 
       <!-- MODAL 1: ADD STUDENT -->
       <div id="addModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
-        <div class="bg-slate-900 border border-white/20 rounded-2xl w-full max-w-md p-6 shadow-2xl animate-fade-in">
+        <div class="bg-slate-900 border border-white/20 rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 shadow-2xl animate-fade-in">
           <div class="flex items-center justify-between mb-4 pb-3 border-b border-white/10">
             <h3 class="text-base font-bold text-white">➕ Add New Student</h3>
             <button onclick="closeAddModal()" class="text-slate-400 hover:text-white">&times;</button>
@@ -1235,12 +1837,30 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               <input type="email" name="email" required pattern=".+@gmail\.com$" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
             </div>
             <div>
-              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Department</label>
-              <input type="text" name="department" placeholder="e.g. Computer Science, Medicine..." class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">University / College</label>
+              <input type="text" name="university" maxlength="255" required placeholder="e.g. Alnasrii University" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
             </div>
             <div>
-              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Password</label>
-              <input type="password" name="password" required minlength="6" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Department</label>
+              <input type="text" name="department" maxlength="100" required placeholder="e.g. Computer Science, Medicine..." class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Gender</label>
+              <select name="gender" required class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+                <option value="">Select gender</option>
+                <option value="Female">Female</option>
+                <option value="Male">Male</option>
+                <option value="Other">Other</option>
+                <option value="Prefer not to say">Prefer not to say</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Phone Number</label>
+              <input type="tel" name="phone" required pattern="^(\+251|251|0)(9\d{8}|7\d{8})$" title="Enter a valid Ethiopian phone number: 09..., 07..., or +251..." placeholder="e.g. 0912345678" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Password (Optional)</label>
+              <input type="password" name="password" placeholder="Leave empty for auto-generated" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
             </div>
             <div>
               <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Role</label>
@@ -1249,6 +1869,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 <option value="admin">Admin</option>
               </select>
             </div>
+            <p class="text-[11px] text-slate-400">Registration date is recorded automatically and status starts as Active.</p>
             <div class="flex justify-end gap-3 pt-3 border-t border-white/10">
               <button type="button" onclick="closeAddModal()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium">Cancel</button>
               <button type="submit" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow">Save Student</button>
@@ -1278,6 +1899,10 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
             <div>
               <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Department</label>
               <input type="text" name="department" id="editDepartment" placeholder="e.g. Computer Science, Medicine..." class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Phone Number</label>
+              <input type="tel" name="phone" id="editPhone" placeholder="e.g. 0912345678" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500">
             </div>
             <div>
               <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">New Password (leave blank to keep unchanged)</label>
@@ -1326,13 +1951,13 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
                 </label>
               </div>
               <input id="adminPhotoInput" name="admin_photo" type="file" accept="image/*" class="hidden" onchange="previewAdminPhoto(this)" />
-              <p class="text-[11px] text-slate-400 mt-2">Suuraa kee filachuuf mallattoo 📷 tuqi (Click icon to pick photo)</p>
+              <p class="text-[11px] text-slate-400 mt-2">Click the 📷 icon to select a new profile photo</p>
             </div>
 
             <!-- Admin Name -->
             <div>
               <label class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">
-                Maqaa Super Admin (Full Name)
+                Super Admin Full Name
               </label>
               <input type="text" name="admin_name" value="<?php echo htmlspecialchars($current_name); ?>" required class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-red-500" />
             </div>
@@ -1347,10 +1972,10 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
 
             <div class="flex items-center justify-end gap-3 pt-3 border-t border-white/10">
               <button type="button" onclick="closeAdminProfileModal()" class="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 transition">
-                Haqi (Cancel)
+                Cancel
               </button>
               <button type="submit" class="bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold px-5 py-2 rounded-xl text-xs shadow-lg transition">
-                💾 Haaromsi (Save Profile)
+                💾 Save Profile
               </button>
             </div>
           </form>
@@ -1372,7 +1997,8 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               const name = (row.getAttribute('data-name') || '').toLowerCase();
               const email = (row.getAttribute('data-email') || '').toLowerCase();
               const dept = (row.getAttribute('data-department') || '').toLowerCase();
-              row.style.display = (name.includes(query) || email.includes(query) || dept.includes(query)) ? '' : 'none';
+              const phone = (row.getAttribute('data-phone') || '').toLowerCase();
+              row.style.display = (name.includes(query) || email.includes(query) || dept.includes(query) || phone.includes(query)) ? '' : 'none';
             });
           });
         }
@@ -1385,11 +2011,13 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
           document.getElementById('editRole').value = st.role || 'student';
           const deptEl = document.getElementById('editDepartment');
           if (deptEl) deptEl.value = st.department || 'General';
+          const phoneEl = document.getElementById('editPhone');
+          if (phoneEl) phoneEl.value = st.phone || '';
           document.getElementById('editModal').classList.remove('hidden');
         }
         function closeEditModal() { document.getElementById('editModal').classList.add('hidden'); }
         function confirmDelete(id, name) {
-          if (confirm("Dhuguma barataa '" + name + "' balleessuu (delete) barbaadduu?")) {
+          if (confirm("Are you sure you want to permanently delete student '" + name + "'?")) {
             document.getElementById('deleteStudentId').value = id;
             document.getElementById('deleteForm').submit();
           }
@@ -1452,6 +2080,10 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
               const search = document.getElementById('studentSearch');
               if (search) search.focus();
             }, 500);
+          } else if (target === 'student_upload') {
+            setActiveNavItem('navItem_student_upload');
+            const sec = document.getElementById('studentUploadSection');
+            highlightSection(sec);
           } else if (target === 'add_student') {
             openAddModal();
             setTimeout(() => {
@@ -1490,6 +2122,7 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
           const sectionMappings = [
             { id: 'dashboardTop', navId: 'navItem_dashboard' },
             { id: 'studentsSection', navId: 'navItem_students' },
+            { id: 'studentUploadSection', navId: 'navItem_student_upload' },
             { id: 'notificationsSection', navId: 'navItem_notifications' },
             { id: 'logoSection', navId: 'navItem_logo' },
             { id: 'bgSection', navId: 'navItem_bg' }
@@ -1757,17 +2390,82 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
     }
 
     // Google Sign-In
+    const googleLoginCsrf = <?php echo json_encode($_SESSION['google_login_csrf'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+    const googleClientId = <?php echo json_encode($google_client_id, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+    let googleSignInInitialized = false;
+
+    function initializeGoogleSignIn() {
+      const buttonContainer = document.getElementById('googleButtonContainer');
+      if (!buttonContainer || googleSignInInitialized) return true;
+
+      const notice = document.getElementById('googleSignupNotice');
+      if (!googleClientId || googleClientId.indexOf('exampleclientid') !== -1) {
+        if (notice) {
+          notice.textContent = 'Optional Google sign-in is unavailable. You can still create your account using this form.';
+          notice.classList.remove('hidden');
+        }
+        return true;
+      }
+
+      if (!window.google || !google.accounts || !google.accounts.id) return false;
+
+      google.accounts.id.initialize({
+        client_id: googleClientId,
+        callback: handleGoogleResponse,
+        context: 'signup',
+        ux_mode: 'popup',
+        auto_select: false
+      });
+      google.accounts.id.renderButton(buttonContainer, {
+        type: 'standard',
+        theme: 'outline',
+        size: 'large',
+        text: 'continue_with',
+        shape: 'rectangular',
+        logo_alignment: 'left',
+        width: Math.min(buttonContainer.clientWidth || 300, 400)
+      });
+      googleSignInInitialized = true;
+      return true;
+    }
+
     function handleGoogleResponse(response) {
       if (!response.credential) return;
+      const emailInput = document.getElementById('regEmail');
+      const notice = document.getElementById('googleSignupNotice');
+      const requestedEmail = emailInput ? emailInput.value.trim() : '';
+      if (!requestedEmail) {
+        if (notice) {
+          notice.textContent = 'Enter your Gmail address in the form before continuing with Google.';
+          notice.classList.remove('hidden');
+        }
+        if (emailInput) emailInput.focus();
+        return;
+      }
       fetch('index.php?action=google_auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential: response.credential })
+        body: JSON.stringify({ credential: response.credential, email: requestedEmail, csrf_token: googleLoginCsrf })
       })
       .then(res => res.json())
       .then(data => {
         if (data.success) {
           window.location.href = 'index.php';
+        } else if (data.email_mismatch) {
+          if (notice) {
+            notice.textContent = data.message;
+            notice.classList.remove('hidden');
+          }
+          if (emailInput) emailInput.focus();
+        } else if (data.needs_registration) {
+          const nameInput = document.getElementById('regFullName');
+          if (nameInput && !nameInput.value && data.name) nameInput.value = data.name;
+          if (notice) {
+            notice.textContent = data.message;
+            notice.classList.remove('hidden');
+          }
+          const registerForm = document.getElementById('authRegisterForm');
+          if (registerForm) registerForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else {
           alert('Google error: ' + (data.message || 'Unknown error'));
         }
@@ -1778,15 +2476,21 @@ $display_admin_email = (strpos(strtolower($current_email), 'admin4566') !== fals
       });
     }
 
-    const gBtn = document.getElementById('googleCustomBtn');
-    if (gBtn) {
-      gBtn.addEventListener('click', () => {
-        if (window.google && google.accounts && google.accounts.id) {
-          google.accounts.id.prompt();
-        } else {
-          alert('Google Client is loading or blocked by your browser extensions.');
+    if (document.getElementById('googleButtonContainer') && !initializeGoogleSignIn()) {
+      let googleInitAttempts = 0;
+      const googleInitTimer = window.setInterval(() => {
+        googleInitAttempts += 1;
+        if (initializeGoogleSignIn()) {
+          window.clearInterval(googleInitTimer);
+        } else if (googleInitAttempts >= 80) {
+          window.clearInterval(googleInitTimer);
+          const notice = document.getElementById('googleSignupNotice');
+          if (notice) {
+            notice.textContent = 'Optional Google sign-in could not load. You can still create your account using this form.';
+            notice.classList.remove('hidden');
+          }
         }
-      });
+      }, 100);
     }
   </script>
 </body>

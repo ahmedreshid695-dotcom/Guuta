@@ -1,47 +1,65 @@
 #!/bin/bash
 set -e
 
-# If external DB_HOST is set and not 127.0.0.1/localhost, skip local MariaDB
-if [ -n "$DB_HOST" ] && [ "$DB_HOST" != "127.0.0.1" ] && [ "$DB_HOST" != "localhost" ]; then
-    echo ">> Using external database at $DB_HOST"
+external_db_configured=true
+case "${DB_HOST,,}" in
+    ""|localhost|127.0.0.1|mysql\ host|your\ host|host)
+        external_db_configured=false
+        ;;
+esac
+if [[ "$DB_HOST" == *[[:space:]]* ]]; then
+    external_db_configured=false
+fi
+
+if [ -z "$DB_NAME" ] || [ -z "$DB_USER" ] || [ -z "$DB_PASS" ]; then
+    external_db_configured=false
+fi
+
+if ! [[ "$DB_PORT" =~ ^[0-9]+$ ]] || [ "$DB_PORT" -lt 1 ] || [ "$DB_PORT" -gt 65535 ]; then
+    external_db_configured=false
+fi
+
+if [ "$external_db_configured" = true ]; then
+    echo ">> Using configured external database at $DB_HOST"
 else
     echo ">> Starting local MariaDB service..."
     service mariadb start || /etc/init.d/mariadb start
 
     # Wait up to 20 seconds for MariaDB to respond
+    database_ready=false
     for i in $(seq 1 20); do
         if mysqladmin ping --silent 2>/dev/null; then
+            database_ready=true
             break
         fi
         sleep 1
     done
 
+    if [ "$database_ready" != true ]; then
+        echo "!! MariaDB did not become ready; cannot start the application database." >&2
+        exit 1
+    fi
+
     echo ">> Configuring database and permissions..."
     mysql -u root <<'EOSQL'
 CREATE DATABASE IF NOT EXISTS stu_register;
-
--- Allow root connections
-ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('');
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
-CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD('');
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
-
--- Create dedicated stu_user with stu_pass123 for guaranteed non-root TCP access
-CREATE USER IF NOT EXISTS 'stu_user'@'%' IDENTIFIED BY 'stu_pass123';
-GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'%' WITH GRANT OPTION;
-CREATE USER IF NOT EXISTS 'stu_user'@'localhost' IDENTIFIED BY 'stu_pass123';
-GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'localhost' WITH GRANT OPTION;
 CREATE USER IF NOT EXISTS 'stu_user'@'127.0.0.1' IDENTIFIED BY 'stu_pass123';
-GRANT ALL PRIVILEGES ON *.* TO 'stu_user'@'127.0.0.1' WITH GRANT OPTION;
+ALTER USER 'stu_user'@'127.0.0.1' IDENTIFIED BY 'stu_pass123';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX ON stu_register.* TO 'stu_user'@'127.0.0.1';
 
 FLUSH PRIVILEGES;
 EOSQL
 
     if [ -f /var/www/html/database.sql ]; then
         echo ">> Importing database.sql..."
-        mysql stu_register < /var/www/html/database.sql 2>/dev/null || true
+        mysql -u root < /var/www/html/database.sql
     fi
     echo ">> Local database ready!"
+    export DB_HOST=127.0.0.1
+    export DB_PORT=3306
+    export DB_NAME=stu_register
+    export DB_USER=stu_user
+    export DB_PASS=stu_pass123
 fi
 
 # Configure Apache port if Render or cloud provider specifies $PORT

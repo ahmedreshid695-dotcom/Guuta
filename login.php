@@ -15,11 +15,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
     $password = $_POST['password'] ?? '';
 
     if (empty($email) || empty($password)) {
-        $error = "Email fi password galchuun barbaachisaadha! (Please enter both email and password)";
+        $error = "Please enter both email and password!";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = "Email sirrii galchaa! (Invalid email format)";
+        $error = "Please enter a valid email address!";
     } elseif (!preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-        $error = "Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com is allowed)";
+        $error = "Only Google accounts (@gmail.com) are allowed!";
     } else {
         $stmt = $conn->prepare("SELECT id, name, email, password FROM students WHERE email = ?");
         if ($stmt) {
@@ -32,7 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
                 $stmt->fetch();
                 if (password_verify($password, $hash)) {
                     if (!is_admin($email_db)) {
-                        $error = "Dhiifama! Fuulli Sign In kun Administrator qofaaf heyyamama. Barattoonni fuula duraa irratti galmaa'uu qofa danda'u. (Sign In is restricted to Administrators only.)";
+                        $error = "Access denied: Sign In is restricted to Administrators only. Students can register on the homepage.";
                     } else {
                         $_SESSION['student_id'] = $id;
                         $_SESSION['student_name'] = $name;
@@ -42,10 +42,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
                         exit();
                     }
                 } else {
-                    $error = "Password dogoggora! Irra deebi'aa yaalaa. (Wrong password!)";
+                    $error = "Incorrect password! Please try again.";
                 }
             } else {
-                $error = "Account-n email kanaan galmaa'e hin argamne! (User not found!)";
+                $error = "No registered account found with this email!";
             }
             $stmt->close();
         } else {
@@ -73,6 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       margin: 0;
+      -webkit-font-smoothing: antialiased;
     }
 
     .card-bg {
@@ -80,7 +81,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
       background-position: center;
       background-repeat: no-repeat;
       background-color: #064e3b;
-      transition: background-image 0.4s ease-in-out;
+      transition: background-image 0.4s ease-in-out, transform 0.35s ease, box-shadow 0.35s ease;
+    }
+    .card-bg:hover {
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.65), 0 0 30px rgba(16, 185, 129, 0.15);
     }
 
     @keyframes slideDown {
@@ -89,6 +93,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
     }
     .animate-slide-down {
       animation: slideDown 0.3s ease-out forwards;
+    }
+
+    /* Universal Smooth Transitions */
+    button, a, input, select, textarea, .site-logo-badge {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Button Hover Elevation */
+    button:not(:disabled):hover, a[class*="bg-"]:hover {
+      transform: translateY(-2px);
+    }
+    button:not(:disabled):active, a[class*="bg-"]:active {
+      transform: translateY(0) scale(0.97);
+    }
+
+    button[type="submit"]:hover {
+      box-shadow: 0 10px 25px -5px rgba(245, 158, 11, 0.4), 0 0 15px rgba(245, 158, 11, 0.2);
+    }
+
+    #googleCustomBtn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+      background-color: #ffffff;
+    }
+
+    .site-logo-badge:hover {
+      transform: scale(1.08) rotate(2deg);
+      box-shadow: 0 0 20px rgba(245, 158, 11, 0.35);
+    }
+
+    input:hover:not(:disabled) {
+      border-color: rgba(255, 255, 255, 0.35);
     }
   </style>
 </head>
@@ -124,7 +160,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
           <p class="text-amber-300 text-xs font-semibold uppercase tracking-wider mb-2">🔒 Administrator Sign In</p>
           <div class="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-[11px] flex items-center justify-center gap-2">
             <span>⚠️</span>
-            <span>Fuulli kun Administrator qofaafi. Barattoonni fuula duraa irratti galmaa'u qofa danda'u.</span>
+            <span>This page is restricted to administrators only. Students should register on the homepage.</span>
           </div>
         </div>
 
@@ -132,7 +168,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
         <?php if($registered_notice): ?>
           <div class="mb-5 p-3 rounded-lg bg-emerald-500/25 border border-emerald-400/50 text-emerald-100 text-xs flex items-center gap-2 animate-slide-down">
             <svg class="w-4 h-4 flex-shrink-0 text-emerald-300" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
-            <span>Galmeen milkaa'eera! Amma email fi password keessaniin seenaa. (Registration successful, please sign in)</span>
+            <span>Registration successful! Please sign in with your administrator credentials.</span>
           </div>
         <?php endif; ?>
 
@@ -331,12 +367,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
         if (data.success) {
           window.location.href = data.redirect || 'dashboard.php';
         } else {
-          alert('Google login dogoggore: ' + (data.message || 'Error occurred'));
+          alert('Google login failed: ' + (data.message || 'Error occurred'));
         }
       })
       .catch(err => {
         console.error(err);
-        alert('Server waliin wal qunnamuu hin dandeenye.');
+        alert('Could not connect to the server. Please try again.');
       });
     }
 
@@ -349,7 +385,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['login']) || isset($_
     });
 
     document.getElementById('githubCustomBtn').addEventListener('click', () => {
-      alert("GitHub Sign-In: Alnasrii University GitHub OAuth tajaajilli yeroo dhiyootti ni eegala. Yeroof Google ykn Form fayyadamaa.");
+      alert("GitHub Sign-In: Alnasrii University GitHub OAuth service will be available soon. Please use Google or the login form.");
     });
   </script>
 </body>

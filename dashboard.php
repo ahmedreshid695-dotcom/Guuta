@@ -26,21 +26,18 @@ $alert_type = "";
 if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    // 1. ADD STUDENT (CREATE)
     if ($action === 'add_student') {
         $name     = trim($_POST['name'] ?? '');
         $email    = trim($_POST['email'] ?? '');
+        $phone    = trim($_POST['phone'] ?? '');
         $password = $_POST['password'] ?? '';
         $role     = trim($_POST['role'] ?? 'student');
 
-        if (empty($name) || empty($email) || empty($password)) {
-            $alert_message = "Hundaa guutuu qabdu! (Please fill in all fields)";
+        if (empty($name) || empty($email)) {
+            $alert_message = "Please fill in all required fields!";
             $alert_type = "error";
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-            $alert_message = "Email Google (@gmail.com) qofa galchaa! (Only @gmail.com is allowed)";
-            $alert_type = "error";
-        } elseif (strlen($password) < 6) {
-            $alert_message = "Password-n yoo xiqqaate qubee/lakkoofsa 6 ta'uu qaba!";
+            $alert_message = "Only Google accounts (@gmail.com) are allowed!";
             $alert_type = "error";
         } else {
             // Check duplicate
@@ -49,23 +46,23 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
             $check_stmt->execute();
             $check_stmt->store_result();
             if ($check_stmt->num_rows > 0) {
-                $alert_message = "Email kun duraan galmaa'ee jira! (Email already exists)";
+                $alert_message = "This email is already registered!";
                 $alert_type = "error";
             } else {
                 $check_stmt->close();
-                $hashed = password_hash($password, PASSWORD_DEFAULT);
-                $ins_stmt = $conn->prepare("INSERT INTO students (name, email, password, role) VALUES (?, ?, ?, ?)");
+                $hashed = !empty($password) ? password_hash($password, PASSWORD_DEFAULT) : password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+                $ins_stmt = $conn->prepare("INSERT INTO students (name, email, password, role, phone) VALUES (?, ?, ?, ?, ?)");
                 if ($ins_stmt) {
-                    $ins_stmt->bind_param("ssss", $name, $email, $hashed, $role);
+                    $ins_stmt->bind_param("sssss", $name, $email, $hashed, $role, $phone);
                     if ($ins_stmt->execute()) {
-                        $alert_message = "Barataan haaraa ('" . htmlspecialchars($name) . "') milkaa'inaan itti dabalameera! (Student Added)";
+                        $alert_message = "New student ('" . htmlspecialchars($name) . "') added successfully!";
                         $alert_type = "success";
                         require_once 'notify.php';
                         if (function_exists('notify_admin_new_registration')) {
-                            @notify_admin_new_registration($name, $email, "Admin Dashboard Add");
+                            @notify_admin_new_registration($name, $email, "Admin Dashboard Add (Tel: $phone)");
                         }
                     } else {
-                        $alert_message = "Dogoggorri uumame: " . $ins_stmt->error;
+                        $alert_message = "Error occurred: " . $ins_stmt->error;
                         $alert_type = "error";
                     }
                     $ins_stmt->close();
@@ -79,14 +76,15 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $student_id = (int)($_POST['student_id'] ?? 0);
         $name       = trim($_POST['name'] ?? '');
         $email      = trim($_POST['email'] ?? '');
+        $phone      = trim($_POST['phone'] ?? '');
         $new_pwd    = $_POST['new_password'] ?? '';
         $role       = trim($_POST['role'] ?? 'student');
 
         if ($student_id <= 0 || empty($name) || empty($email)) {
-            $alert_message = "Ragaan barataa guutuu miti! (Invalid student data)";
+            $alert_message = "Invalid or incomplete student data!";
             $alert_type = "error";
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-            $alert_message = "Email Google (@gmail.com) qofa galchaa!";
+            $alert_message = "Only Google accounts (@gmail.com) are allowed!";
             $alert_type = "error";
         } else {
             // Check duplicate email for another student
@@ -96,35 +94,35 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
             $dup_stmt->store_result();
 
             if ($dup_stmt->num_rows > 0) {
-                $alert_message = "Email kun barataa biraatiin qabameera! (Email taken by another student)";
+                $alert_message = "This email is already taken by another student!";
                 $alert_type = "error";
             } else {
                 $dup_stmt->close();
                 if (!empty($new_pwd)) {
                     if (strlen($new_pwd) < 6) {
-                        $alert_message = "Password-n yoo xiqqaate qubee/lakkoofsa 6 ta'uu qaba!";
+                        $alert_message = "Password must be at least 6 characters long!";
                         $alert_type = "error";
                     } else {
                         $new_hashed = password_hash($new_pwd, PASSWORD_DEFAULT);
-                        $up_stmt = $conn->prepare("UPDATE students SET name = ?, email = ?, password = ?, role = ? WHERE id = ?");
-                        $up_stmt->bind_param("ssssi", $name, $email, $new_hashed, $role, $student_id);
+                        $up_stmt = $conn->prepare("UPDATE students SET name = ?, email = ?, password = ?, role = ?, phone = ? WHERE id = ?");
+                        $up_stmt->bind_param("sssssi", $name, $email, $new_hashed, $role, $phone, $student_id);
                         if ($up_stmt->execute()) {
-                            $alert_message = "Ragaan barataa fi password milkaa'inaan haaromeera! (Updated successfully)";
+                            $alert_message = "Student details and password updated successfully!";
                             $alert_type = "success";
                         } else {
-                            $alert_message = "Dogoggorri haaromsuu: " . $up_stmt->error;
+                            $alert_message = "Update error: " . $up_stmt->error;
                             $alert_type = "error";
                         }
                         $up_stmt->close();
                     }
                 } else {
-                    $up_stmt = $conn->prepare("UPDATE students SET name = ?, email = ?, role = ? WHERE id = ?");
-                    $up_stmt->bind_param("sssi", $name, $email, $role, $student_id);
+                    $up_stmt = $conn->prepare("UPDATE students SET name = ?, email = ?, role = ?, phone = ? WHERE id = ?");
+                    $up_stmt->bind_param("ssssi", $name, $email, $role, $phone, $student_id);
                     if ($up_stmt->execute()) {
-                        $alert_message = "Ragaan barataa milkaa'inaan haaromeera! (Updated successfully)";
+                        $alert_message = "Student details updated successfully!";
                         $alert_type = "success";
                     } else {
-                        $alert_message = "Dogoggorri haaromsuu: " . $up_stmt->error;
+                        $alert_message = "Update error: " . $up_stmt->error;
                         $alert_type = "error";
                     }
                     $up_stmt->close();
@@ -137,7 +135,7 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
     elseif ($action === 'delete_student') {
         $student_id = (int)($_POST['student_id'] ?? 0);
         if ($student_id <= 0) {
-            $alert_message = "ID barataa hin argamne!";
+            $alert_message = "Student ID not found!";
             $alert_type = "error";
         } else {
             // Prevent admin from deleting themselves
@@ -146,17 +144,17 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
             $chk_self->execute();
             $chk_self->bind_result($del_email);
             if ($chk_self->fetch() && strtolower($del_email) === strtolower($current_user_email)) {
-                $alert_message = "Account keessan ofumaan balleessuu hin dandeessan! (You cannot delete your own admin account)";
+                $alert_message = "You cannot delete your own admin account!";
                 $alert_type = "error";
             } else {
                 $chk_self->close();
                 $del_stmt = $conn->prepare("DELETE FROM students WHERE id = ?");
                 $del_stmt->bind_param("i", $student_id);
                 if ($del_stmt->execute()) {
-                    $alert_message = "Barataan milkaa'inaan haqameera! (Student deleted successfully)";
+                    $alert_message = "Student deleted successfully!";
                     $alert_type = "success";
                 } else {
-                    $alert_message = "Dogoggora balleessuu: " . $del_stmt->error;
+                    $alert_message = "Delete error: " . $del_stmt->error;
                     $alert_type = "error";
                 }
                 $del_stmt->close();
@@ -169,7 +167,7 @@ if ($is_admin_user && $_SERVER['REQUEST_METHOD'] === 'POST') {
 $all_students = [];
 $total_students = 0;
 if ($is_admin_user) {
-    $res = $conn->query("SELECT id, name, email, role, created_at FROM students ORDER BY id DESC");
+    $res = $conn->query("SELECT id, name, email, phone, role, created_at FROM students ORDER BY id DESC");
     if ($res) {
         while ($row = $res->fetch_assoc()) {
             $em_lower = strtolower(trim($row['email'] ?? ''));
@@ -226,6 +224,7 @@ if ($notif_res) {
   <style>
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-8px); }
@@ -233,6 +232,32 @@ if ($notif_res) {
     }
     .animate-fade-in {
       animation: fadeIn 0.25s ease-out forwards;
+    }
+
+    /* Universal Smooth Transitions */
+    button, a, input, select, textarea, .stat-card, .site-logo-icon, tr {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Button Hover Elevation */
+    button:not(:disabled):hover, a[class*="bg-"]:hover {
+      transform: translateY(-2px);
+    }
+    button:not(:disabled):active, a[class*="bg-"]:active {
+      transform: translateY(0) scale(0.97);
+    }
+
+    button[type="submit"]:hover, button[class*="bg-red"]:hover {
+      box-shadow: 0 10px 25px -5px rgba(239, 68, 68, 0.4), 0 0 18px rgba(239, 68, 68, 0.25);
+    }
+
+    .site-logo-icon:hover {
+      transform: scale(1.08) rotate(2deg);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.45);
+    }
+
+    input:hover:not(:disabled), select:hover:not(:disabled) {
+      border-color: rgba(255, 255, 255, 0.35);
     }
   </style>
 </head>
@@ -305,7 +330,7 @@ if ($notif_res) {
               <?php echo $is_admin_user ? 'Administrator System Control' : 'Active Student Account'; ?>
             </div>
             <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-              Baga Nagaan Dhufte, <?php echo htmlspecialchars($current_user_name); ?>!
+              Welcome, <?php echo htmlspecialchars($current_user_name); ?>!
             </h1>
             <p class="text-sm text-green-100/90 mt-1 flex items-center gap-2">
               <svg class="w-4 h-4 text-green-300" fill="currentColor" viewBox="0 0 20 20"><path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path><path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"></path></svg>
@@ -331,7 +356,7 @@ if ($notif_res) {
         </div>
         <h2 class="text-2xl font-bold text-white mb-2">Registration Successful!</h2>
         <p class="text-emerald-300 font-medium text-sm mb-4">
-          Galmeen keessan milkaa'inaan galmaa'ee jira! (Your student account has been registered successfully)
+          Your student account has been registered and confirmed successfully!
         </p>
 
         <div class="p-4 rounded-xl bg-white/5 border border-white/10 text-left text-xs space-y-2 mb-6">
@@ -345,12 +370,12 @@ if ($notif_res) {
           </div>
           <div class="flex justify-between py-1">
             <span class="text-slate-400">Account Status:</span>
-            <span class="text-emerald-400 font-bold">Mirkanaa'eera (Confirmed / Active)</span>
+            <span class="text-emerald-400 font-bold">Confirmed / Active</span>
           </div>
         </div>
 
         <div class="p-4 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs text-left mb-6 leading-relaxed">
-          ℹ️ <strong>Hubachiisa (Notice):</strong> Fuulli kun kan barattootaati. Fuulli bulchiinsa barattootaa (Admin Dashboard) fi CRUD (Add, Edit, Delete) kan qophaa'e qondaaltota dhimmi ilaallatu (Admin) qofaafi.
+          ℹ️ <strong>Notice:</strong> This is your student status overview. Administrative controls (Student Directory, Add, Edit, Delete) are restricted to authorized administrators only.
         </div>
 
         <div class="flex justify-center gap-3">
@@ -405,7 +430,7 @@ if ($notif_res) {
             <h2 class="text-xl font-bold text-white flex items-center gap-2">
               <span>📋</span> Student Management (CRUD Control)
             </h2>
-            <p class="text-xs text-slate-400 mt-0.5">Barattoota haaraa dabalii, kan jiran gulaali (update), ykn haqi (delete).</p>
+            <p class="text-xs text-slate-400 mt-0.5">Add new students, edit existing student records, or delete students.</p>
           </div>
 
           <div class="flex items-center gap-3">
@@ -413,7 +438,7 @@ if ($notif_res) {
             <div class="relative">
               <input
                 type="text" id="studentSearch"
-                placeholder="Search name or email..."
+                placeholder="Search name, email, or phone..."
                 class="px-3.5 py-2 pl-9 rounded-xl bg-slate-900 border border-white/10 text-white placeholder-slate-400 text-xs outline-none focus:ring-2 focus:ring-emerald-500 w-48 sm:w-60"
               />
               <span class="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
@@ -437,6 +462,7 @@ if ($notif_res) {
                 <th class="py-3 px-4">ID</th>
                 <th class="py-3 px-4">Student Name</th>
                 <th class="py-3 px-4">Email</th>
+                <th class="py-3 px-4">Phone</th>
                 <th class="py-3 px-4">Role</th>
                 <th class="py-3 px-4">Registered Date</th>
                 <th class="py-3 px-4 text-center">Actions</th>
@@ -445,13 +471,13 @@ if ($notif_res) {
             <tbody class="divide-y divide-white/5">
               <?php if(empty($all_students)): ?>
                 <tr>
-                  <td colspan="6" class="py-8 text-center text-slate-400">
-                    Barataan galmaa'e hin jiru. (No students found)
+                  <td colspan="7" class="py-8 text-center text-slate-400">
+                    No registered students found.
                   </td>
                 </tr>
               <?php else: ?>
                 <?php foreach($all_students as $st): ?>
-                  <tr class="student-row hover:bg-white/5 transition" data-name="<?php echo htmlspecialchars(strtolower($st['name'])); ?>" data-email="<?php echo htmlspecialchars(strtolower($st['email'])); ?>">
+                  <tr class="student-row hover:bg-white/5 transition" data-name="<?php echo htmlspecialchars(strtolower($st['name'])); ?>" data-email="<?php echo htmlspecialchars(strtolower($st['email'])); ?>" data-phone="<?php echo htmlspecialchars(strtolower($st['phone'] ?? '')); ?>">
                     <td class="py-3.5 px-4 font-mono text-slate-400">#<?php echo $st['id']; ?></td>
                     <td class="py-3.5 px-4 font-semibold text-white flex items-center gap-2.5">
                       <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-300 font-bold flex items-center justify-center text-xs">
@@ -460,6 +486,7 @@ if ($notif_res) {
                       <span><?php echo htmlspecialchars($st['name']); ?></span>
                     </td>
                     <td class="py-3.5 px-4 text-slate-300"><?php echo htmlspecialchars($st['email']); ?></td>
+                    <td class="py-3.5 px-4 font-mono text-emerald-300 text-xs"><?php echo htmlspecialchars($st['phone'] ?? '-'); ?></td>
                     <td class="py-3.5 px-4">
                       <?php if($st['role'] === 'admin'): ?>
                         <span class="bg-red-500/20 text-red-300 border border-red-500/30 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">Admin</span>
@@ -507,7 +534,7 @@ if ($notif_res) {
         </div>
 
         <?php if(empty($notifications)): ?>
-          <p class="text-xs text-slate-400 py-4 text-center">Beeksisni haaraan hin jiru.</p>
+          <p class="text-xs text-slate-400 py-4 text-center">No recent notifications or alerts.</p>
         <?php else: ?>
           <div class="space-y-2.5">
             <?php foreach($notifications as $n): ?>
@@ -550,8 +577,13 @@ if ($notif_res) {
             </div>
 
             <div>
-              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Password</label>
-              <input type="password" name="password" placeholder="At least 6 characters" required minlength="6" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-emerald-500">
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Phone Number</label>
+              <input type="tel" name="phone" placeholder="e.g. 0912345678" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-emerald-500">
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Password (Optional)</label>
+              <input type="password" name="password" placeholder="Leave empty for auto-generated" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-emerald-500">
             </div>
 
             <div>
@@ -597,6 +629,11 @@ if ($notif_res) {
             </div>
 
             <div>
+              <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">Phone Number</label>
+              <input type="tel" name="phone" id="editPhone" placeholder="e.g. 0912345678" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-emerald-500">
+            </div>
+
+            <div>
               <label class="block text-xs font-semibold uppercase text-slate-300 mb-1">New Password (leave empty to keep unchanged)</label>
               <input type="password" name="new_password" placeholder="Leave blank to keep current" minlength="6" class="w-full px-3.5 py-2.5 rounded-lg bg-slate-800 border border-white/10 text-white text-xs outline-none focus:ring-2 focus:ring-emerald-500">
             </div>
@@ -630,9 +667,10 @@ if ($notif_res) {
           searchInput.addEventListener('input', (e) => {
             const query = e.target.value.toLowerCase().trim();
             document.querySelectorAll('.student-row').forEach(row => {
-              const name = row.getAttribute('data-name');
-              const email = row.getAttribute('data-email');
-              if (name.includes(query) || email.includes(query)) {
+              const name = row.getAttribute('data-name') || '';
+              const email = row.getAttribute('data-email') || '';
+              const phone = row.getAttribute('data-phone') || '';
+              if (name.includes(query) || email.includes(query) || phone.includes(query)) {
                 row.style.display = '';
               } else {
                 row.style.display = 'none';
@@ -655,6 +693,8 @@ if ($notif_res) {
           document.getElementById('editName').value = student.name;
           document.getElementById('editEmail').value = student.email;
           document.getElementById('editRole').value = student.role || 'student';
+          const phoneEl = document.getElementById('editPhone');
+          if (phoneEl) phoneEl.value = student.phone || '';
           document.getElementById('editModal').classList.remove('hidden');
         }
         function closeEditModal() {
@@ -663,7 +703,7 @@ if ($notif_res) {
 
         // Confirm Delete
         function confirmDelete(id, name) {
-          if (confirm("Dhuguma barataa '" + name + "' balleessuu (delete) barbaadduu?")) {
+          if (confirm("Are you sure you want to permanently delete student '" + name + "'?")) {
             document.getElementById('deleteStudentId').value = id;
             document.getElementById('deleteForm').submit();
           }

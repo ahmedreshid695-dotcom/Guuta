@@ -6,7 +6,7 @@ function notify_admin_new_registration($name, $email, $method = "Manual Form") {
 
     $recipient = !empty($admin_email) ? $admin_email : "ahmedreshid695@gmail.com";
     $time = date("Y-m-d H:i:s");
-    $subject = "Beeksisa Galmee Haaraa: " . $name;
+    $subject = "New Student Registration: " . $name;
 
     // HTML Email Template
     $message = "
@@ -14,7 +14,7 @@ function notify_admin_new_registration($name, $email, $method = "Manual Form") {
     <html>
     <head>
         <meta charset='UTF-8'>
-        <title>Galmee Barataa Haaraa</title>
+        <title>New Student Registration</title>
         <style>
             body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }
             .container { background-color: #ffffff; padding: 25px; border-radius: 8px; max-width: 520px; margin: auto; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
@@ -30,31 +30,31 @@ function notify_admin_new_registration($name, $email, $method = "Manual Form") {
     <body>
         <div class='container'>
             <div class='header'>
-                <h2>🎉 Barataan Haaraa Galmaa'ee Jira!</h2>
+                <h2>🎉 New Student Registration</h2>
             </div>
             <div class='content'>
-                <p>Akkam jirtu, barataan haaraa portal keessan irratti milkaa'inaan galmaa'eera:</p>
+                <p>Hello Admin, a new student has successfully registered on the portal:</p>
                 <table class='info-table'>
                     <tr>
-                        <td class='label'>Maqaa Guutuu:</td>
+                        <td class='label'>Full Name:</td>
                         <td><strong>" . htmlspecialchars($name) . "</strong></td>
                     </tr>
                     <tr>
-                        <td class='label'>Email Barataa:</td>
+                        <td class='label'>Student Email:</td>
                         <td>" . htmlspecialchars($email) . "</td>
                     </tr>
                     <tr>
-                        <td class='label'>Mala Galmee:</td>
+                        <td class='label'>Registration Method:</td>
                         <td>" . htmlspecialchars($method) . "</td>
                     </tr>
                     <tr>
-                        <td class='label'>Guyyaa fi Sa'aatii:</td>
+                        <td class='label'>Date &amp; Time:</td>
                         <td>" . $time . "</td>
                     </tr>
                 </table>
             </div>
             <div class='footer'>
-                Ergaan kun ofumaan sirna Guuta Student Portal irraa ergame.
+                This is an automated notification from the Alnasrii University Student Portal system.
             </div>
         </div>
     </body>
@@ -64,7 +64,7 @@ function notify_admin_new_registration($name, $email, $method = "Manual Form") {
     // Headers
     $headers  = "MIME-Version: 1.0\r\n";
     $headers .= "Content-Type: text/html; charset=UTF-8\r\n";
-    $headers .= "From: Guuta Portal <no-reply@guuta-portal.com>\r\n";
+    $headers .= "From: Alnasrii University Portal <no-reply@guuta-portal.com>\r\n";
     $headers .= "Reply-To: " . $email . "\r\n";
 
     // 1. Send Email
@@ -76,8 +76,8 @@ function notify_admin_new_registration($name, $email, $method = "Manual Form") {
 
     // 3. Optional: save to database if notifications table exists
     if (isset($conn) && $conn instanceof mysqli && !$conn->connect_error) {
-        $db_title = "Barataa Haaraa: " . $name;
-        $db_msg = "Barataan maqaan isa $name (email: $email) karaa $method galmaa'eera.";
+        $db_title = "New Student: " . $name;
+        $db_msg = "Student $name ($email) has registered via $method.";
         @$conn->query("CREATE TABLE IF NOT EXISTS notifications (
             id INT AUTO_INCREMENT PRIMARY KEY,
             title VARCHAR(255) NOT NULL,

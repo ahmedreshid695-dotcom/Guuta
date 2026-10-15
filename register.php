@@ -13,35 +13,36 @@ $error_field = "";
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset($_POST['name']) || isset($_POST['register']))) {
     $fullName = trim($_POST['fullName'] ?? $_POST['name'] ?? '');
     $email    = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
-    $confirmPassword = $_POST['confirmPassword'] ?? '';
+    $phone    = trim($_POST['phone'] ?? '');
+
+    // Strict Ethiopian phone validation
+    $clean_phone = preg_replace('/[\s\-\(\)]+/', '', $phone);
+    $is_ethiopian_phone = preg_match('/^(?:\+251|251|0)(9\d{8}|7\d{8})$/', $clean_phone, $phone_matches);
 
     // Validation
     if (empty($fullName)) {
-        $error = "Maqaa guutuu galchuun barbaachisaadha! (Full name is required)";
+        $error = "Full name is required!";
         $error_field = "fullName";
     } elseif (mb_strlen($fullName) < 3) {
-        $error = "Maqaan yoo xiqqaate qubee 3 ta'uu qaba! (Full name must be at least 3 characters)";
+        $error = "Full name must be at least 3 characters!";
         $error_field = "fullName";
     } elseif (empty($email)) {
-        $error = "Email galchuun barbaachisaadha! (Email is required)";
+        $error = "Email address is required!";
         $error_field = "email";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = "Email sirrii galchaa! (Please enter a valid email address)";
+        $error = "Please enter a valid email address!";
         $error_field = "email";
     } elseif (!preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-        $error = "Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com is allowed)";
+        $error = "Only Google (@gmail.com) accounts are allowed!";
         $error_field = "email";
-    } elseif (empty($password)) {
-        $error = "Password galchuun barbaachisaadha! (Password is required)";
-        $error_field = "password";
-    } elseif (strlen($password) < 6) {
-        $error = "Password-n yoo xiqqaate qubee/lakkoofsa 6 ta'uu qaba! (Password must be at least 6 characters)";
-        $error_field = "password";
-    } elseif (!empty($confirmPassword) && $password !== $confirmPassword) {
-        $error = "Password-n wal hin simne! (Passwords do not match)";
-        $error_field = "confirmPassword";
+    } elseif (empty($phone)) {
+        $error = "Phone number is required!";
+        $error_field = "phone";
+    } elseif (!$is_ethiopian_phone) {
+        $error = "Please enter a valid Ethiopian phone number! (e.g. 0912345678, 0712345678, or +251912345678)";
+        $error_field = "phone";
     } else {
+        $standard_phone = '0' . $phone_matches[1];
         // Check duplicate email
         $stmt = $conn->prepare("SELECT id FROM students WHERE email = ?");
         if ($stmt) {
@@ -50,15 +51,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
             $stmt->store_result();
 
             if ($stmt->num_rows > 0) {
-                $error = "Email kun duraan galmaa'ee jira! Gara Login deemaa. (Email already registered!)";
+                $error = "This email is already registered! Please sign in.";
                 $error_field = "email";
             } else {
                 $stmt->close();
-                $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                $dummy_password = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
 
-                $insert_stmt = $conn->prepare("INSERT INTO students (name, email, password) VALUES (?, ?, ?)");
+                $insert_stmt = $conn->prepare("INSERT INTO students (name, email, password, phone) VALUES (?, ?, ?, ?)");
                 if ($insert_stmt) {
-                    $insert_stmt->bind_param("sss", $fullName, $email, $hashed_password);
+                    $insert_stmt->bind_param("ssss", $fullName, $email, $dummy_password, $standard_phone);
                     if ($insert_stmt->execute()) {
                         $success = "Registration successful! Welcome to Alnasrii University 🎓";
                         
@@ -66,11 +67,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
                         if (file_exists('notify.php')) {
                             require_once 'notify.php';
                             if (function_exists('notify_admin_new_registration')) {
-                                @notify_admin_new_registration($fullName, $email, "Alnasrii Form Galmee");
+                                @notify_admin_new_registration($fullName, $email, "Registration Form (Tel: $standard_phone)");
                             }
                         }
                     } else {
-                        $error = "Dogoggorri galmee uumame: " . $insert_stmt->error;
+                        $error = "Registration error: " . $insert_stmt->error;
                     }
                     $insert_stmt->close();
                 } else {
@@ -83,16 +84,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
     }
 
     if ($is_ajax) {
-        header('Content-Type: application/json');
+        header('Content-Type: application/json; charset=utf-8');
         if (!empty($error)) {
             echo json_encode(['success' => false, 'message' => $error, 'field' => $error_field]);
         } else {
             echo json_encode([
-                'success' => true, 
-                'message' => $success, 
+                'success'  => true,
+                'message'  => $success,
                 'redirect' => 'login.php?registered=1'
             ]);
         }
+        exit();
+    }
+
+    // Non-AJAX (standard form POST) — server-side redirect after success
+    if (empty($error) && !empty($success)) {
+        header('Location: login.php?registered=1');
         exit();
     }
 }
@@ -116,6 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       margin: 0;
+      -webkit-font-smoothing: antialiased;
     }
 
     /* Background photo container - default fallback color */
@@ -124,7 +132,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
       background-position: center;
       background-repeat: no-repeat;
       background-color: #064e3b;
-      transition: background-image 0.4s ease-in-out;
+      transition: background-image 0.4s ease-in-out, transform 0.35s ease, box-shadow 0.35s ease;
+    }
+    .card-bg:hover {
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.65), 0 0 30px rgba(16, 185, 129, 0.15);
     }
 
     /* Subtle animation for toast notifications */
@@ -134,6 +145,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
     }
     .animate-slide-down {
       animation: slideDown 0.3s ease-out forwards;
+    }
+
+    /* Universal Smooth Transitions */
+    button, a, input, select, textarea, .site-logo-badge {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Button Hover Elevation */
+    button:not(:disabled):hover, a[class*="bg-"]:hover {
+      transform: translateY(-2px);
+    }
+    button:not(:disabled):active, a[class*="bg-"]:active {
+      transform: translateY(0) scale(0.97);
+    }
+
+    button[type="submit"]:hover {
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.4), 0 0 15px rgba(16, 185, 129, 0.2);
+    }
+
+    #googleCustomBtn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+      background-color: #ffffff;
+    }
+
+    .site-logo-badge:hover {
+      transform: scale(1.08) rotate(2deg);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.35);
+    }
+
+    input:hover:not(:disabled) {
+      border-color: rgba(255, 255, 255, 0.35);
     }
   </style>
 </head>
@@ -219,40 +262,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
             <p class="text-red-300 text-xs mt-1.5 font-medium hidden" data-error="email"></p>
           </div>
 
-          <!-- Password -->
+          <!-- Phone Number -->
           <div>
-            <label for="password" class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Password</label>
-            <div class="relative">
-              <input
-                id="password" name="password" type="password"
-                placeholder="Minimum 6 characters"
-                class="w-full px-4 py-2.5 pr-14 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 focus:bg-white transition shadow-sm"
-                required
-              />
-              <button type="button" data-toggle="password"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-gray-500 hover:text-gray-800 text-xs font-semibold rounded cursor-pointer select-none transition">
-                Show
-              </button>
+            <div class="flex items-center justify-between mb-1.5">
+              <label for="phone" class="text-white text-xs font-semibold uppercase tracking-wider">Phone Number</label>
+              <span class="text-[11px] text-green-200/90 font-mono">(09... / 07... / +251...)</span>
             </div>
-            <p class="text-red-300 text-xs mt-1.5 font-medium hidden" data-error="password"></p>
-          </div>
-
-          <!-- Confirm Password -->
-          <div>
-            <label for="confirmPassword" class="block text-white text-xs font-semibold uppercase tracking-wider mb-1.5">Confirm Password</label>
-            <div class="relative">
-              <input
-                id="confirmPassword" name="confirmPassword" type="password"
-                placeholder="Repeat your password"
-                class="w-full px-4 py-2.5 pr-14 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 focus:bg-white transition shadow-sm"
-                required
-              />
-              <button type="button" data-toggle="confirmPassword"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-gray-500 hover:text-gray-800 text-xs font-semibold rounded cursor-pointer select-none transition">
-                Show
-              </button>
-            </div>
-            <p class="text-red-300 text-xs mt-1.5 font-medium hidden" data-error="confirmPassword"></p>
+            <input
+              id="phone" name="phone" type="tel"
+              value="<?php echo isset($_POST['phone']) ? htmlspecialchars($_POST['phone']) : ''; ?>"
+              placeholder="0912345678 or +251912345678"
+              pattern="^(\+251|251|0)(9\d{8}|7\d{8})$"
+              title="Enter an Ethiopian phone number: 09..., 07... or +251..."
+              class="w-full px-4 py-2.5 rounded-lg bg-white/95 text-gray-900 placeholder-gray-400 text-sm font-medium outline-none focus:ring-2 focus:ring-green-400 focus:bg-white transition shadow-sm"
+              required
+            />
+            <p class="text-red-300 text-xs mt-1.5 font-medium hidden" data-error="phone"></p>
           </div>
 
           <!-- Remember Me + Forgot Password -->
@@ -466,11 +491,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
 
       const fullName = document.getElementById('fullName').value.trim();
       const email = document.getElementById('email').value.trim();
-      const password = document.getElementById('password').value;
-      const confirmPassword = document.getElementById('confirmPassword').value;
+      const phone = document.getElementById('phone').value.trim();
 
       if (!fullName) {
-        showError('fullName', 'Full name is required (Maqaa guutuu galchaa)');
+        showError('fullName', 'Full name is required');
         valid = false;
       } else if (fullName.length < 3) {
         showError('fullName', 'Full name must be at least 3 characters');
@@ -479,29 +503,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
 
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!email) {
-        showError('email', 'Email is required (Email galchaa)');
+        showError('email', 'Email is required');
         valid = false;
       } else if (!emailRegex.test(email)) {
         showError('email', 'Please enter a valid email address');
         valid = false;
       } else if (!email.toLowerCase().endsWith('@gmail.com')) {
-        showError('email', 'Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com)');
+        showError('email', 'Only Google accounts (@gmail.com) are allowed!');
         valid = false;
       }
 
-      if (!password) {
-        showError('password', 'Password is required');
-        valid = false;
-      } else if (password.length < 6) {
-        showError('password', 'Password must be at least 6 characters');
-        valid = false;
-      }
+      const ethPhoneRegex = /^(?:\+251|251|0)(9\d{8}|7\d{8})$/;
+      const cleanPhone = phone.replace(/[\s\-\(\)]+/g, '');
 
-      if (!confirmPassword) {
-        showError('confirmPassword', 'Please confirm your password');
+      if (!phone) {
+        showError('phone', 'Phone number is required');
         valid = false;
-      } else if (password !== confirmPassword) {
-        showError('confirmPassword', 'Passwords do not match (Wal hin simne)');
+      } else if (!ethPhoneRegex.test(cleanPhone)) {
+        showError('phone', 'Phone number must be a valid Ethiopian number (09... or 07..., 10 digits)!');
         valid = false;
       }
 
@@ -549,8 +568,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
           btnSpinner.classList.add('hidden');
           form.reset();
 
+          const redirectUrl = data.redirect || 'login.php?registered=1';
           setTimeout(() => {
-            window.location.href = data.redirect || 'login.php?registered=1';
+            // Use replace() for reliable redirect on all hosting environments
+            window.location.replace(redirectUrl);
           }, 1500);
         } else {
           submitBtn.disabled = false;
@@ -560,13 +581,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
           if (data.field) {
             showError(data.field, data.message);
           } else {
-            showError('email', data.message || 'Galmeen hin milkoofne. Irra deebi\'aa yaalaa.');
+            showError('email', data.message || 'Registration failed. Please try again.');
           }
         }
       } catch (error) {
         console.warn('AJAX submission fell back to standard submit:', error);
-        // Fallback to standard form post
-        document.getElementById('isAjaxInput').value = '0';
+        // Fallback: disable AJAX flag so PHP returns HTML page, not JSON
+        const ajaxInput = document.getElementById('isAjaxInput');
+        if (ajaxInput) ajaxInput.remove(); // Remove so PHP won't see is_ajax=1
         form.submit();
       }
     });
@@ -591,7 +613,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
         if (data.success) {
           window.location.href = data.redirect || 'dashboard.php';
         } else {
-          alert('Google login dogoggore: ' + (data.message || 'Error occurred'));
+          alert('Google login failed: ' + (data.message || 'Error occurred'));
           submitBtn.disabled = false;
           btnSpinner.classList.add('hidden');
           btnText.textContent = 'Create Account';
@@ -599,7 +621,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
       })
       .catch(err => {
         console.error(err);
-        alert('Server waliin wal qunnamuu hin dandeenye.');
+        alert('Could not connect to the server. Please try again.');
         submitBtn.disabled = false;
         btnSpinner.classList.add('hidden');
         btnText.textContent = 'Create Account';
@@ -617,7 +639,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['fullName']) || isset
 
     // GitHub Button Handler
     document.getElementById('githubCustomBtn').addEventListener('click', () => {
-      alert("GitHub Sign-In: Alnasrii University GitHub OAuth tajaajilli yeroo dhiyootti ni eegala. Yeroof Google ykn Form fayyadamaa.");
+      alert("GitHub Sign-In: Alnasrii University GitHub OAuth service will be available soon. Please use Google or the registration form.");
     });
 
     // Restore custom logo

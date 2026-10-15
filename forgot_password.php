@@ -10,15 +10,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_password'])) {
     $confirm_password = $_POST['confirm_password'] ?? '';
 
     if (empty($email) || empty($new_password) || empty($confirm_password)) {
-        $error = "Hundaa guutuu qabdu! (Please fill all fields!)";
+        $error = "Please fill in all fields!";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = "Email sirrii galchaa! (Invalid email address)";
+        $error = "Please enter a valid email address!";
     } elseif (!preg_match('/^[a-zA-Z0-9._%+-]+@gmail\.com$/i', $email)) {
-        $error = "Email Google (@gmail.com) qofatu heyyamama! (Only @gmail.com is allowed!)";
+        $error = "Only Google accounts (@gmail.com) are allowed!";
     } elseif (strlen($new_password) < 6) {
-        $error = "Password-n yoo xiqqaate qubee/lakkoofsa 6 ta'uu qaba! (Password must be at least 6 characters!)";
+        $error = "Password must be at least 6 characters long!";
     } elseif ($new_password !== $confirm_password) {
-        $error = "Password-n wal hin simne! (Passwords do not match!)";
+        $error = "Passwords do not match!";
     } else {
         // Check if email exists
         $stmt = $conn->prepare("SELECT id FROM students WHERE email = ?");
@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_password'])) {
             $stmt->store_result();
 
             if ($stmt->num_rows === 0) {
-                $error = "Email kun hin galmoofne! (Email not found!)";
+                $error = "No account found with this email!";
             } else {
                 $stmt->close();
                 $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
@@ -36,9 +36,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_password'])) {
                 if ($update_stmt) {
                     $update_stmt->bind_param("ss", $hashed_password, $email);
                     if ($update_stmt->execute()) {
-                        $success = "Password haaraan milkaa'inaan jijjiirameera! (Password successfully updated!)";
+                        $success = "Your password has been reset successfully!";
                     } else {
-                        $error = "Dogoggorri uumameera: " . $update_stmt->error;
+                        $error = "Error updating password: " . $update_stmt->error;
                     }
                     $update_stmt->close();
                 } else {
@@ -69,13 +69,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_password'])) {
   <style>
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
     .card-bg {
       background-size: cover;
       background-position: center;
       background-repeat: no-repeat;
       background-color: #064e3b;
-      transition: background-image 0.4s ease-in-out;
+      transition: background-image 0.4s ease-in-out, transform 0.35s ease, box-shadow 0.35s ease;
+    }
+    .card-bg:hover {
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.65), 0 0 30px rgba(16, 185, 129, 0.15);
+    }
+
+    button, a, input {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    button:not(:disabled):hover, a[class*="bg-"]:hover {
+      transform: translateY(-2px);
+    }
+    button:not(:disabled):active, a[class*="bg-"]:active {
+      transform: translateY(0) scale(0.97);
+    }
+    button[type="submit"]:hover {
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.4), 0 0 15px rgba(16, 185, 129, 0.2);
+    }
+    input:hover:not(:disabled) {
+      border-color: rgba(255, 255, 255, 0.35);
     }
   </style>
 </head>
@@ -117,7 +137,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_password'])) {
           <div class="mb-5 p-4 rounded-xl bg-emerald-500/25 border border-emerald-400/50 text-emerald-100 text-xs text-center space-y-3">
             <p class="font-semibold text-sm"><?php echo htmlspecialchars($success); ?></p>
             <a href="login.php" class="inline-block bg-white text-green-800 font-bold px-4 py-2 rounded-lg hover:bg-green-50 transition shadow text-xs">
-              Gara Login Deemi (Sign In Now) &rarr;
+              Go to Sign In &rarr;
             </a>
           </div>
         <?php else: ?>

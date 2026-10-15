@@ -51,10 +51,40 @@ if (!$conn || $conn->connect_errno) {
     </div>");
 }
 
-// Auto-check and ensure role, picture, and department columns exist in students table
-@$conn->query("ALTER TABLE students ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'student'");
-@$conn->query("ALTER TABLE students ADD COLUMN IF NOT EXISTS picture VARCHAR(255) DEFAULT ''");
-@$conn->query("ALTER TABLE students ADD COLUMN IF NOT EXISTS department VARCHAR(100) DEFAULT 'General'");
+// Auto-check and ensure account and university-registration columns exist in students table
+$alter_sql = "ALTER TABLE students ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'student';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS picture VARCHAR(255) DEFAULT '';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS department VARCHAR(100) DEFAULT 'General';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS phone VARCHAR(50) DEFAULT '';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS gender VARCHAR(30) DEFAULT '';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS university VARCHAR(255) DEFAULT '';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS registration_date DATE DEFAULT NULL;";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS enrollment_status ENUM('Active', 'Inactive', 'Graduated') NOT NULL DEFAULT 'Active';";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS registered_by_email VARCHAR(255) DEFAULT NULL;";
+$alter_sql .= "ALTER TABLE students ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;";
+$schema_error = null;
+try {
+    if (!$conn->multi_query($alter_sql)) {
+        $schema_error = $conn->error;
+    } else {
+        do {
+            if ($result = $conn->store_result()) {
+                $result->free();
+            }
+        } while ($conn->more_results() && $conn->next_result());
+        if ($conn->errno) {
+            $schema_error = $conn->error;
+        }
+    }
+} catch (mysqli_sql_exception $e) {
+    $schema_error = $e->getMessage();
+}
+if ($schema_error !== null) {
+    die("<div style='font-family:sans-serif;padding:20px;background:#fee;border:1px solid #f99;margin:20px;border-radius:8px;'>
+        <h3 style='color:#c00;margin-top:0;'>Database Schema Update Error</h3>
+        <p>Could not prepare the student registration fields: " . htmlspecialchars($schema_error) . "</p>
+    </div>");
+}
 
 // Google OAuth Client ID
 $google_client_id = getenv('GOOGLE_CLIENT_ID') ?: "108394857492-exampleclientid.apps.googleusercontent.com";
@@ -93,10 +123,19 @@ function is_admin($email = null) {
 
     // Also check database role (so newly promoted admins have full admin power)
     if (!empty($conn) && $conn instanceof mysqli && !$conn->connect_error) {
-        $check = @$conn->query("SELECT role FROM students WHERE email = '" . $conn->real_escape_string($email) . "' LIMIT 1");
-        if ($check && $row = $check->fetch_assoc()) {
-            if (($row['role'] ?? '') === 'admin') {
-                return true;
+        // Use prepared statement to avoid any 'commands out of sync' issues
+        $stmt = @$conn->prepare("SELECT role FROM students WHERE email = ? LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param('s', $email);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            if ($result && $row = $result->fetch_assoc()) {
+                $stmt->close();
+                if (($row['role'] ?? '') === 'admin') {
+                    return true;
+                }
+            } else {
+                $stmt->close();
             }
         }
     }

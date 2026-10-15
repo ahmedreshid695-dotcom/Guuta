@@ -1,0 +1,9 @@
+.git
+.vscode
+.idea
+*.log
+.env
+.env.*
+!.env.example
+uploads/*
+!uploads/.gitkeep
